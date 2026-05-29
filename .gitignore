@@ -1,0 +1,17 @@
+# Factory-firmware checkout created by scripts/install_firmware.sh
+/build-firmware/
+build/
+
+# Runtime
+*.log
+bridge.log
+
+# Python
+__pycache__/
+*.pyc
+
+# Icon generator previews
+firmware/tools/preview_*.png
+
+# macOS
+.DS_Store
