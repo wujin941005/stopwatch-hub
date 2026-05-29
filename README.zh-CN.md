@@ -4,6 +4,12 @@
 
 [English README](README.md)
 
+![CC Island 在 M5Stack StopWatch 上运行](docs/cover.jpg)
+
+这张图是 CC Island 在真机上的第一版工作表盘：上半区是 Claude Code，下半区是
+Codex。右侧的大百分比表示当前 5 小时窗口用量，`7d` 是 7 天窗口用量，`reset`
+显示当前窗口还要多久重置，底部金额和 token 数来自 Mac 本地会话日志的估算统计。
+
 CC Island 把一块 **M5Stack StopWatch**（圆形 AMOLED，ESP32‑S3）变成一个 AI 用量小表盘：
 单页同时显示 **Claude Code（橙）** 和 **Codex（蓝）** 的 5 小时 / 7 天用量、重置倒计时，以及今日花费与 token。
 

@@ -4,6 +4,14 @@
 >
 > 把 Claude Code 和 Codex 的用量额度，搬到你的手表上。
 
+![CC Island running on an M5Stack StopWatch](docs/cover.jpg)
+
+This is the first working CC Island face on real hardware. The photo shows
+Claude Code and Codex usage side by side: the large percentage is the current
+5-hour window, the smaller `7d` percentage is the weekly window, `reset` is the
+time until the current window refreshes, and the bottom numbers show today's
+estimated spend and token volume from local session logs.
+
 CC Island turns an **M5Stack StopWatch** (round AMOLED, ESP32‑S3) into a tiny
 ambient display for your AI coding usage. One screen shows both providers at a
 glance — Claude Code (orange) on top, Codex (blue) below — with each one's
