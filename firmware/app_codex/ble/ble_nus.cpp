@@ -160,6 +160,9 @@ void start_advertising()
     fields.name = (uint8_t*)g_name;
     fields.name_len = strlen(g_name);
     fields.name_is_complete = 1;
+    fields.uuids128 = &kSvcUuid;
+    fields.num_uuids128 = 1;
+    fields.uuids128_is_complete = 1;
     ble_gap_adv_set_fields(&fields);
 
     ble_gap_adv_start(g_addr_type, nullptr, BLE_HS_FOREVER, &adv_params,

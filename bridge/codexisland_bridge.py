@@ -470,8 +470,12 @@ def render(data):
 # --------------------------------------------------------------------------- #
 NUS_RX_UUID = "6e400002-b5a3-f393-e0a9-e50e24dcca9e"   # Mac -> watch (usage JSON)
 NUS_TX_UUID = "6e400003-b5a3-f393-e0a9-e50e24dcca9e"   # watch -> Mac (refresh request)
+NUS_SERVICE_UUID = "6e400001-b5a3-f393-e0a9-e50e24dcca9e"
 BLE_DEVICE_NAME = "CC Island"
 MANUAL_REFRESH_MIN_GAP = 5  # seconds — throttle button-triggered refreshes
+SCAN_TIMEOUT_S = 20
+RECONNECT_DELAY_S = 3
+MAX_STALE_PROVIDER_S = 6 * 60 * 60
 
 
 def _win_pct(w):
@@ -503,11 +507,86 @@ async def ble_loop(interval_s):
     from bleak import BleakClient, BleakScanner
 
     refresh = asyncio.Event()   # set when the watch's button asks for a refresh
+    disconnected = asyncio.Event()
     last_push = [0.0]
+    last_good = {}
+
+    def remember_good(data):
+        now = time.time()
+        for name in ("claude", "codex"):
+            provider = data.get(name) or {}
+            if "error" not in provider and provider.get("five_hour") and provider.get("weekly"):
+                cached = dict(provider)
+                cached["_cached_at"] = now
+                last_good[name] = cached
+
+    def with_cached_windows(data):
+        now = time.time()
+        merged = dict(data)
+        for name in ("claude", "codex"):
+            provider = dict(data.get(name) or {})
+            cached = last_good.get(name)
+            if "error" in provider and cached and now - cached.get("_cached_at", 0) <= MAX_STALE_PROVIDER_S:
+                restored = {k: v for k, v in cached.items() if not k.startswith("_")}
+                restored["cost_today"] = provider.get("cost_today", restored.get("cost_today", 0))
+                restored["tokens_today"] = provider.get("tokens_today", restored.get("tokens_today", 0))
+                restored["stale"] = True
+                merged[name] = restored
+            else:
+                merged[name] = provider
+        return merged
+
+    async def find_watch():
+        target_uuid = NUS_SERVICE_UUID.lower()
+
+        def match(device, adv):
+            name = device.name or adv.local_name or ""
+            service_uuids = [u.lower() for u in (adv.service_uuids or [])]
+            return name == BLE_DEVICE_NAME or target_uuid in service_uuids
+
+        dev = await BleakScanner.find_device_by_filter(match, timeout=SCAN_TIMEOUT_S)
+        if dev:
+            return dev
+
+        # Diagnostic fallback: list visible named devices without failing the loop.
+        try:
+            seen = await BleakScanner.discover(timeout=5, return_adv=True)
+            names = []
+            for _, (device, adv) in seen.items():
+                name = device.name or adv.local_name
+                if name:
+                    names.append(name)
+            if names:
+                print("  visible BLE names:", ", ".join(sorted(set(names))[:12]))
+        except Exception as e:  # noqa: BLE001
+            print("  scan diagnostic failed:", e)
+        return None
+
+    async def connect_watch(dev):
+        disconnected.clear()
+        client = BleakClient(
+            dev,
+            disconnected_callback=lambda _client: disconnected.set(),
+            services=[NUS_SERVICE_UUID],
+            timeout=20,
+        )
+        await client.connect()
+        print(f"connected to {dev.address}")
+        try:
+            await client.start_notify(NUS_TX_UUID, lambda _h, _d: refresh.set())
+        except Exception as e:  # noqa: BLE001
+            print("  (button refresh unavailable:", e, ")")
+        return client
 
     async def push(client, tag):
-        payload = compact(collect())
-        await client.write_gatt_char(NUS_RX_UUID, (payload + "\n").encode(), response=False)
+        data = collect()
+        remember_good(data)
+        payload = compact(with_cached_windows(data))
+        try:
+            await client.write_gatt_char(NUS_RX_UUID, (payload + "\n").encode(), response=True)
+        except Exception:
+            await asyncio.sleep(0.5)
+            await client.write_gatt_char(NUS_RX_UUID, (payload + "\n").encode(), response=False)
         last_push[0] = time.time()
         print(f"pushed ({tag}):", payload)
 
@@ -516,28 +595,38 @@ async def ble_loop(interval_s):
         try:
             if client is None or not client.is_connected:
                 print(f"scanning for '{BLE_DEVICE_NAME}'...")
-                dev = await BleakScanner.find_device_by_name(BLE_DEVICE_NAME, timeout=15)
+                dev = await find_watch()
                 if not dev:
                     print("  not found — is the CC Island app open on the watch? retrying")
                     await asyncio.sleep(5)
                     continue
-                client = BleakClient(dev)
-                await client.connect()
-                print(f"connected to {dev.address}")
-                try:
-                    await client.start_notify(NUS_TX_UUID, lambda _h, _d: refresh.set())
-                except Exception as e:  # noqa: BLE001
-                    print("  (button refresh unavailable:", e, ")")
+                client = await connect_watch(dev)
                 await push(client, "connect")
 
             # Wake on either the periodic timer or a button-triggered refresh.
             try:
-                await asyncio.wait_for(refresh.wait(), timeout=interval_s)
-                refresh.clear()
-                if time.time() - last_push[0] >= MANUAL_REFRESH_MIN_GAP:
-                    await push(client, "button")
+                refresh_task = asyncio.create_task(refresh.wait())
+                disconnect_task = asyncio.create_task(disconnected.wait())
+                done, pending = await asyncio.wait(
+                    {refresh_task, disconnect_task},
+                    timeout=interval_s,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                for task in pending:
+                    task.cancel()
+                if disconnect_task in done:
+                    print("disconnected")
+                    client = None
+                    refresh.clear()
+                    continue
+                if refresh_task in done:
+                    refresh.clear()
+                    if time.time() - last_push[0] >= MANUAL_REFRESH_MIN_GAP:
+                        await push(client, "button")
+                    else:
+                        print("  refresh throttled (too soon)")
                 else:
-                    print("  refresh throttled (too soon)")
+                    await push(client, "auto")
             except asyncio.TimeoutError:
                 await push(client, "auto")
         except Exception as e:  # noqa: BLE001 — keep the loop alive across BLE hiccups
@@ -549,7 +638,8 @@ async def ble_loop(interval_s):
                 pass
             client = None
             refresh.clear()
-            await asyncio.sleep(3)
+            disconnected.clear()
+            await asyncio.sleep(RECONNECT_DELAY_S)
 
 
 def main():
