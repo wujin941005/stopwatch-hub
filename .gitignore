@@ -15,3 +15,6 @@ firmware/tools/preview_*.png
 
 # macOS
 .DS_Store
+
+# Local secrets — real WiFi / bridge / OpenCode Go credentials
+.env

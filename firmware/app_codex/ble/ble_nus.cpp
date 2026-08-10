@@ -42,7 +42,7 @@ const ble_uuid128_t kTxUuid = BLE_UUID128_INIT(
     0x9e, 0xca, 0xdc, 0x24, 0x0e, 0xe5, 0xa9, 0xe0,
     0x93, 0xf3, 0xa3, 0xb5, 0x03, 0x00, 0x40, 0x6e);
 
-constexpr int kLineMax = 256;
+constexpr int kLineMax = 512;
 
 SemaphoreHandle_t g_mtx = nullptr;
 char g_assembling[kLineMax];   // partial bytes received so far (host task only)
@@ -160,13 +160,29 @@ void start_advertising()
     fields.name = (uint8_t*)g_name;
     fields.name_len = strlen(g_name);
     fields.name_is_complete = 1;
-    fields.uuids128 = &kSvcUuid;
-    fields.num_uuids128 = 1;
-    fields.uuids128_is_complete = 1;
-    ble_gap_adv_set_fields(&fields);
+    int rc = ble_gap_adv_set_fields(&fields);
+    if (rc != 0) {
+        mclog::tagError(TAG, "ble_gap_adv_set_fields failed: {}", rc);
+        return;
+    }
 
-    ble_gap_adv_start(g_addr_type, nullptr, BLE_HS_FOREVER, &adv_params,
-                      gap_event, nullptr);
+    // Legacy advertising packets are limited to 31 bytes. Flags + complete
+    // name + the 128-bit NUS UUID need 32 bytes, so advertise the name in the
+    // primary packet and put the service UUID in the scan response.
+    struct ble_hs_adv_fields response = {};
+    response.uuids128 = &kSvcUuid;
+    response.num_uuids128 = 1;
+    response.uuids128_is_complete = 1;
+    rc = ble_gap_adv_rsp_set_fields(&response);
+    if (rc != 0) {
+        mclog::tagError(TAG, "ble_gap_adv_rsp_set_fields failed: {}", rc);
+        return;
+    }
+
+    rc = ble_gap_adv_start(g_addr_type, nullptr, BLE_HS_FOREVER, &adv_params,
+                           gap_event, nullptr);
+    if (rc != 0)
+        mclog::tagError(TAG, "ble_gap_adv_start failed: {}", rc);
 }
 
 void on_sync()

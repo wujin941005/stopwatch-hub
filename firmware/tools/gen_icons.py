@@ -5,7 +5,6 @@ Pipeline: SVG --(svglib/reportlab, scaled via dpi)--> black-on-white raster
 --> coverage mask --> tint with brand color on black --> RGB565 LE --> .c file
 matching the format of main/assets/images/icon_stopwatch.c.
 """
-import io
 import os
 
 from svglib.svglib import svg2rlg
@@ -22,6 +21,7 @@ OUT = os.environ.get(
 
 CLAUDE = 0xF2854D
 CODEX = 0x3B9EFF
+OPENCODE = 0x8B5CF6
 
 
 def render_coverage(svg_name, size):
@@ -35,6 +35,16 @@ def render_coverage(svg_name, size):
     return Image.eval(pil, lambda p: 255 - p)
 
 
+def render_rgb(svg_name, size):
+    """Render a full-color square SVG onto the launcher's black background."""
+    d = svg2rlg(os.path.join(SRC, svg_name))
+    dpi = 72.0 * size / float(d.width)
+    pil = renderPM.drawToPIL(d, dpi=dpi, bg=0x000000).convert("RGB")
+    if pil.size != (size, size):
+        pil = pil.resize((size, size), Image.LANCZOS)
+    return pil
+
+
 def tint(cov, color):
     """Tint a coverage mask with `color` over a black background -> RGB image."""
     r, g, b = (color >> 16) & 0xFF, (color >> 8) & 0xFF, color & 0xFF
@@ -45,10 +55,6 @@ def tint(cov, color):
             a = cv[x, y] / 255.0
             px[x, y] = (int(r * a), int(g * a), int(b * a))
     return out
-
-
-def paste_on(canvas, rgb, x, y):
-    canvas.paste(rgb, (x, y))
 
 
 def to_c(name, img):
@@ -99,12 +105,10 @@ def main():
     print("Generating row logos (48x48):")
     to_c("logo_claude", tint(render_coverage("claude.svg", 48), CLAUDE))
     to_c("logo_codex", tint(render_coverage("openai.svg", 48), CODEX))
+    to_c("logo_opencode", tint(render_coverage("opencode.svg", 48), OPENCODE))
 
     print("Generating launcher icon (200x200):")
-    launcher = Image.new("RGB", (200, 200), (0, 0, 0))
-    paste_on(launcher, tint(render_coverage("claude.svg", 80), CLAUDE), 60, 10)
-    paste_on(launcher, tint(render_coverage("openai.svg", 80), CODEX), 60, 110)
-    to_c("icon_codex", launcher)
+    to_c("icon_cc_island", render_rgb("cc_island.svg", 200))
 
 
 if __name__ == "__main__":

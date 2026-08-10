@@ -9,10 +9,11 @@
 #include <memory>
 
 /**
- * @brief CodexIsland — shows Claude Code + Codex usage on one page.
+ * @brief CC Island — AI usage and host monitoring for M5Stack StopWatch.
  *
- * Phase 3: static placeholder values + two-row layout. Phase 4 will feed it
- * live numbers over BLE.
+ * Supports a compact two-provider page or separate Codex/OpenCode pages,
+ * plus an optional host-system page. Data arrives over BLE or Wi-Fi polling;
+ * pages can auto-rotate or be switched with horizontal swipes.
  */
 class AppCodex : public mooncake::AppAbility {
 public:

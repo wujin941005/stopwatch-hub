@@ -1,31 +1,45 @@
 #!/usr/bin/env python3
 """
-CodexIsland StopWatch bridge — Mac side (Phase 1: data only).
+CC Island StopWatch bridge — one bridge, two transports, three providers.
 
-Reads the same local credentials CodexIsland uses and queries the providers'
-own usage endpoints, then prints the combined Claude + Codex usage. No secrets
-ever leave this machine; later phases push the *computed* numbers to the
-StopWatch over BLE.
+Data is always computed locally (credentials and logs never leave this
+machine); only the *finished* numbers are sent to the watch — either pushed
+over BLE (Nordic UART, the original transport) or served over HTTP for the
+watch to poll over Wi-Fi.
 
-Recipes mirror ericjypark/codex-island:
-  - Codex : GET chatgpt.com/backend-api/wham/usage with the access_token from
-            ~/.codex/auth.json.
-  - Claude: GET api.anthropic.com/api/oauth/usage with a Claude Code token
-            (env -> keychain -> refresh), CLI User-Agent + oauth beta header.
+Providers:
+  - Claude  : GET api.anthropic.com/api/oauth/usage (keychain/env OAuth,
+              mirrors ericjypark/codex-island) + today's cost from
+              ~/.claude/projects/**/*.jsonl.
+  - Codex   : GET chatgpt.com/backend-api/wham/usage via ~/.codex/auth.json
+              + today's cost from ~/.codex/sessions logs.
+  - OpenCode: SQLite read of ~/.local/share/opencode/opencode.db — the
+              message table carries OpenCode's own cost + token counters.
 
-Phase 1 scope: the 5h / weekly utilization windows + reset times + plan.
-Cost estimation (session-log parsing) is intentionally deferred to Phase 1b.
+Claude/Codex API-equivalent values use OpenRouter's public model catalog,
+cached locally for offline operation. No credentials, prompts, or usage data
+are sent to OpenRouter.
+
+Optional system stats (CPU / memory / disk / network) come from the Windows
+host through WSL interop, with /proc + statvfs as a fallback. Set
+CC_SYSTEM_MONITOR=true to collect them and include the watch's system page.
 
 Usage:
-    python3 codexisland_bridge.py            # human-readable
-    python3 codexisland_bridge.py --json     # machine JSON (the BLE payload)
+    python3 codexisland_bridge.py                 # human-readable one-shot
+    python3 codexisland_bridge.py --json          # full machine JSON
+    python3 codexisland_bridge.py --serve [port]  # WiFi polling server (default 8080)
+    python3 codexisland_bridge.py --ble [mins]    # BLE push every N minutes (needs bleak)
 """
 
+import argparse
 import json
+import math
 import os
+import re
 import ssl
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -42,6 +56,31 @@ try:
     _SSL_CTX = ssl.create_default_context(cafile=certifi.where())
 except ImportError:
     _SSL_CTX = ssl.create_default_context()
+
+DEFAULT_OPENCODE_DB = "~/.local/share/opencode/opencode.db"
+
+_TRUE_VALUES = {"1", "true", "yes", "on"}
+_FALSE_VALUES = {"0", "false", "no", "off"}
+
+
+def _env_bool(name, default=False):
+    """Parse a conventional boolean environment variable."""
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    value = raw.strip().lower()
+    if value in _TRUE_VALUES:
+        return True
+    if value in _FALSE_VALUES:
+        return False
+    print(f"WARN: {name}={raw!r} is not a boolean; using {default}",
+          file=sys.stderr)
+    return default
+
+
+def system_monitor_enabled():
+    """Whether host metrics should be collected and sent to the watch."""
+    return _env_bool("CC_SYSTEM_MONITOR", False)
 
 
 # --------------------------------------------------------------------------- #
@@ -80,7 +119,6 @@ def _parse_reset(value):
         return None
     if isinstance(value, (int, float)):
         return int(value)
-    # ISO string
     try:
         from datetime import datetime
         s = value.replace("Z", "+00:00")
@@ -109,14 +147,26 @@ def fetch_codex():
     )
     if status == 401:
         return {"error": "auth expired — codex login"}
+    if status == 0:
+        detail = str((obj or {}).get("_transport_error", "")).lower()
+        if "network is unreachable" in detail:
+            return {"error": "network unreachable"}
+        if "timed out" in detail:
+            return {"error": "network timeout"}
+        return {"error": "network unavailable"}
     if status != 200 or not isinstance(obj, dict):
         return {"error": f"http {status}"}
 
     rl = obj.get("rate_limit") or {}
 
     def win(w):
-        d = rl.get(w) or {}
-        return _window(d.get("used_percent", 0), _parse_reset(d.get("reset_at")))
+        d = rl.get(w)
+        if not d:
+            return None
+        wnd = _window(d.get("used_percent", 0), _parse_reset(d.get("reset_at")))
+        if d.get("limit_window_seconds"):
+            wnd["window_seconds"] = d["limit_window_seconds"]
+        return wnd
 
     return {
         "plan": obj.get("plan_type"),
@@ -140,7 +190,6 @@ def _security(args):
 
 
 def _claude_keychain_account():
-    """Pull the account name from the `"acct"...="value"` metadata line."""
     out = _security(["find-generic-password", "-s", "Claude Code-credentials"])
     if not out or out.returncode != 0:
         return None
@@ -158,7 +207,6 @@ def _claude_keychain_account():
 
 
 def _read_claude_creds():
-    """Return dict of the claudeAiOauth keychain payload, or None."""
     account = _claude_keychain_account()
     if not account:
         return None
@@ -179,7 +227,6 @@ def _read_claude_creds():
 
 
 def _write_claude_creds(account, oauth):
-    """Persist rotated tokens back so Claude Code itself doesn't break."""
     payload = json.dumps({"claudeAiOauth": oauth})
     out = _security([
         "add-generic-password", "-U",
@@ -209,7 +256,6 @@ def _refresh_claude(refresh_token):
 
 
 def _probe_claude(token, plan):
-    """Single usage-endpoint probe. Returns ('ok', usage) or ('err', reason)."""
     status, obj = _http(
         "GET", "https://api.anthropic.com/api/oauth/usage",
         headers={
@@ -244,29 +290,26 @@ def fetch_claude():
     creds = _read_claude_creds()
     plan = (creds["oauth"].get("subscriptionType") if creds else None)
 
-    # 1) env token (set by Claude Desktop for child procs; always fresh)
     env_token = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN")
     if env_token:
         kind, val = _probe_claude(env_token, plan)
         if kind == "ok":
             return val
         if kind == "scope":
-            last_error = val  # env scope-insufficient does NOT short-circuit
+            last_error = val
         elif kind == "err":
             last_error = val
 
     if creds:
         oauth = creds["oauth"]
-        # 2) keychain access token
         kind, val = _probe_claude(oauth["accessToken"], plan)
         if kind == "ok":
             return val
         if kind == "scope":
-            return {"error": val}  # refresh can't fix a missing scope
+            return {"error": val}
         if kind == "err":
             last_error = val
 
-        # 3) refresh + writeback, then retry
         refreshed = _refresh_claude(oauth["refreshToken"])
         if refreshed:
             oauth = dict(oauth)
@@ -286,37 +329,592 @@ def fetch_claude():
 
 
 # --------------------------------------------------------------------------- #
-# Cost — parse local session logs (mirrors CodexIsland Pricing + log readers)
+# OpenCode — SQLite read of ~/.local/share/opencode/opencode.db
 # --------------------------------------------------------------------------- #
-# Per-million-token USD rates: (input, output, cache_create, cache_read)
-_PRICING = {
-    "claude-opus-4-8": (5, 25, 6.25, 0.50),
-    "claude-opus-4-7": (5, 25, 6.25, 0.50),
-    "claude-opus-4-6": (5, 25, 6.25, 0.50),
-    "claude-opus-4-5": (5, 25, 6.25, 0.50),
-    "claude-sonnet-4-6": (3, 15, 3.75, 0.30),
-    "claude-sonnet-4-5": (3, 15, 3.75, 0.30),
-    "claude-haiku-4-5": (1, 5, 1.25, 0.10),
-    "gpt-5.5": (5, 30, 5, 0.50),
-    "gpt-5.4": (2.5, 15, 2.5, 0.25),
-    "gpt-5.2": (1.75, 14, 1.75, 0.175),
-    "gpt-5.4-mini": (0.75, 4.5, 0.75, 0.075),
-    "gpt-5-codex": (1.25, 10, 1.25, 0.125),
+def _day_start_ms(days_ago=0):
+    """Epoch milliseconds for local midnight `days_ago` calendar days back."""
+    import datetime
+    now = datetime.datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    start = now - datetime.timedelta(days=days_ago)
+    return int(start.timestamp() * 1000)
+
+
+def _opencode_query(con, since_ms):
+    """Legacy fallback for OpenCode databases without message-level usage."""
+    row = con.execute(
+        """
+        SELECT COUNT(*),
+               COALESCE(SUM(cost), 0),
+               COALESCE(SUM(tokens_input), 0) + COALESCE(SUM(tokens_output), 0)
+                 + COALESCE(SUM(tokens_reasoning), 0)
+                 + COALESCE(SUM(tokens_cache_read), 0) + COALESCE(SUM(tokens_cache_write), 0)
+        FROM session
+        WHERE time_created >= ?
+        """,
+        (since_ms,),
+    ).fetchone()
+    return {"sessions": int(row[0]), "cost": float(row[1] or 0), "tokens": int(row[2] or 0)}
+
+
+def _opencode_message_usage(con, today_ms, week_ms):
+    """Aggregate OpenCode's own per-message cost/token counters.
+
+    Session rows are lifetime aggregates, so filtering them by session creation
+    time misses usage when an older session is continued today. Assistant
+    messages carry the same counters with their actual event time. CROSS JOIN
+    keeps `session` as the outer loop so OpenCode's `(session_id, time_created)`
+    message index can serve the bounded lookup instead of scanning the large
+    message table.
+    """
+    row = con.execute(
+        """
+        WITH assistant AS (
+            SELECT m.session_id,
+                   m.time_created,
+                   COALESCE(CAST(json_extract(m.data, '$.cost') AS REAL), 0) AS cost,
+                   COALESCE(CAST(json_extract(m.data, '$.tokens.input') AS INTEGER), 0)
+                     + COALESCE(CAST(json_extract(m.data, '$.tokens.output') AS INTEGER), 0)
+                     + COALESCE(CAST(json_extract(m.data, '$.tokens.reasoning') AS INTEGER), 0)
+                     + COALESCE(CAST(json_extract(m.data, '$.tokens.cache.read') AS INTEGER), 0)
+                     + COALESCE(CAST(json_extract(m.data, '$.tokens.cache.write') AS INTEGER), 0)
+                     AS tokens
+            FROM session AS s
+            CROSS JOIN message AS m
+            WHERE s.time_updated >= :week
+              AND m.session_id = s.id
+              AND m.time_created >= :week
+              AND CASE WHEN json_valid(m.data)
+                       THEN json_extract(m.data, '$.role') END = 'assistant'
+        )
+        SELECT COUNT(DISTINCT CASE WHEN time_created >= :today THEN session_id END),
+               COALESCE(SUM(CASE WHEN time_created >= :today THEN cost ELSE 0 END), 0),
+               COALESCE(SUM(CASE WHEN time_created >= :today THEN tokens ELSE 0 END), 0),
+               COALESCE(SUM(cost), 0)
+        FROM assistant
+        """,
+        {"today": today_ms, "week": week_ms},
+    ).fetchone()
+    return {
+        "sessions": int(row[0] or 0),
+        "cost": float(row[1] or 0),
+        "tokens": int(row[2] or 0),
+        "week_cost": float(row[3] or 0),
+    }
+
+
+def fetch_opencode(db_path=None):
+    """Return {t, T, s, d} — today cost, today tokens, today sessions, 7d cost."""
+    path = os.path.expanduser(db_path or os.environ.get("OPENCODE_DB", DEFAULT_OPENCODE_DB))
+    if not os.path.exists(path):
+        return {"error": "no opencode db"}
+    try:
+        import sqlite3
+        con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        try:
+            today_ms = _day_start_ms()
+            week_ms = _day_start_ms(6)
+            try:
+                usage = _opencode_message_usage(con, today_ms, week_ms)
+                source = "messages"
+            except sqlite3.Error:
+                # Older OpenCode schemas only expose lifetime session totals.
+                today = _opencode_query(con, today_ms)
+                week = _opencode_query(con, week_ms)
+                usage = {**today, "week_cost": week["cost"]}
+                source = "sessions"
+        finally:
+            con.close()
+    except (OSError, sqlite3.Error):
+        return {"error": "opencode db read failed"}
+    return {
+        "t": round(usage["cost"], 2),
+        "T": int(usage["tokens"]),
+        "s": int(usage["sessions"]),
+        "d": round(usage["week_cost"], 2),
+        "source": source,
+    }
+
+
+# --------------------------------------------------------------------------- #
+# System stats — Windows-host PC via PowerShell (WSL interop), /proc fallback
+# --------------------------------------------------------------------------- #
+_PC_STATS_CACHE = {}
+_PC_STATS_CACHE_TTL = 5.0
+_PC_NAME = ""  # Windows computer name, fetched once
+_SYS_REFRESH_TTL = 4.0
+_SYS_REFRESHER_STARTED = False
+
+# Combined PowerShell query: CPU load, memory, C: disk (space + r/w rates),
+# and network rates.
+_POWERSHELL_STATS_SCRIPT = r"""
+$ErrorActionPreference = 'Stop'
+$cpu = [math]::Round((Get-CimInstance Win32_Processor | Measure-Object -Property LoadPercentage -Average).Average, 1)
+$os  = Get-CimInstance Win32_OperatingSystem
+$mem = [math]::Round((1 - ($os.FreePhysicalMemory / $os.TotalVisibleMemorySize)) * 100, 1)
+$d   = Get-CimInstance Win32_LogicalDisk -Filter 'DriveType=3' | Where-Object DeviceID -eq 'C:'
+$disk = if ($d) { [math]::Round((1 - $d.FreeSpace / $d.Size) * 100, 1) } else { $null }
+$dr  = (Get-Counter '\PhysicalDisk(*)\Disk Read Bytes/sec').CounterSamples | Measure-Object CookedValue -Sum
+$dw  = (Get-Counter '\PhysicalDisk(*)\Disk Write Bytes/sec').CounterSamples | Measure-Object CookedValue -Sum
+$rx  = (Get-Counter '\Network Interface(*)\Bytes Received/sec').CounterSamples | Measure-Object CookedValue -Sum
+$tx  = (Get-Counter '\Network Interface(*)\Bytes Sent/sec').CounterSamples | Measure-Object CookedValue -Sum
+[pscustomobject]@{
+    name = [string]$env:COMPUTERNAME
+    cpu  = $cpu
+    mem  = $mem
+    disk = $disk
+    dr   = [math]::Round($dr.Sum / 1024, 1)
+    dw   = [math]::Round($dw.Sum / 1024, 1)
+    nup  = [math]::Round($tx.Sum / 1024, 1)
+    ndn  = [math]::Round($rx.Sum / 1024, 1)
+} | ConvertTo-Json -Compress
+"""
+
+
+def _pc_sys_stats():
+    """Query the Windows host over WSL interop (powered by -EncodedCommand to
+    dodge quoting). Returns a dict or None on any failure."""
+    import base64
+    # WSL interop doesn't put powershell.exe on PATH; use the full path.
+    ps = ("/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe"
+          if os.path.exists("/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe")
+          else "powershell.exe")
+    try:
+        encoded = base64.b64encode(_POWERSHELL_STATS_SCRIPT.encode("utf-16-le")).decode()
+        out = subprocess.run(
+            [ps, "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=15,
+        )
+        line = out.stdout.strip().splitlines()[-1] if out.stdout.strip() else ""
+        d = json.loads(line)
+        s = {k: (None if d.get(k) is None else float(d[k]))
+             for k in ("cpu", "mem", "disk", "dr", "dw", "nup", "ndn")}
+        if d.get("name"):
+            s["name"] = str(d["name"]).strip()
+        return s
+    except (OSError, subprocess.TimeoutExpired, ValueError, json.JSONDecodeError):
+        return None
+
+
+# --------------------------------------------------------------------------- #
+# System stats — pure /proc reads (CPU / memory / disk / network)
+# --------------------------------------------------------------------------- #
+def _read_proc_lines(path):
+    with open(path) as f:
+        return f.readlines()
+
+
+def _cpu_pct(sample_s=0.25):
+    def _sample():
+        line = _read_proc_lines("/proc/stat")[0].split()
+        vals = [int(v) for v in line[1:8]]
+        return sum(vals), vals[3]  # total, idle
+    try:
+        t0, i0 = _sample()
+        time.sleep(sample_s)
+        t1, i1 = _sample()
+        delta = t1 - t0
+        if delta <= 0:
+            return 0.0
+        return round(100.0 * (1 - (i1 - i0) / delta), 1)
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def _mem_pct():
+    try:
+        mem = {}
+        for line in _read_proc_lines("/proc/meminfo"):
+            key, _, rest = line.partition(":")
+            mem[key] = rest.split()[0]
+        total = float(mem["MemTotal"])
+        avail = float(mem["MemAvailable"])
+        if total <= 0:
+            return None
+        return round(100.0 * (total - avail) / total, 1)
+    except (OSError, ValueError, KeyError):
+        return None
+
+
+def _disk_pct(mount="/"):
+    try:
+        st = os.statvfs(mount)
+        total = st.f_blocks * st.f_frsize
+        avail = st.f_bavail * st.f_frsize
+        if total <= 0:
+            return None
+        return round(100.0 * (total - avail) / total, 1)
+    except OSError:
+        return None
+
+
+def _net_bytes():
+    rx = tx = 0
+    for line in _read_proc_lines("/proc/net/dev")[2:]:
+        if ":" not in line:
+            continue
+        iface, rest = line.split(":", 1)
+        fields = rest.split()
+        if iface.strip() == "lo" or not fields:
+            continue
+        rx += int(fields[0])  # receive bytes
+        tx += int(fields[8])  # transmit bytes
+    return rx, tx
+
+
+def _net_rate_kbps(sample_s=0.5):
+    try:
+        r0, t0 = _net_bytes()
+        time.sleep(sample_s)
+        r1, t1 = _net_bytes()
+        up = (t1 - t0) / 1024.0 / sample_s
+        dn = (r1 - r0) / 1024.0 / sample_s
+        return round(up, 1), round(dn, 1)
+    except (OSError, ValueError, IndexError):
+        return None, None
+
+
+def _sys_refresher():
+    """Background loop that keeps the PC stats cache warm, so /stats never has
+    to wait on the slow PowerShell query."""
+    global _PC_STATS_CACHE
+    while True:
+        time.sleep(_SYS_REFRESH_TTL)
+        try:
+            s = _pc_sys_stats()
+            if s:
+                name = s.pop("name", None)
+                _PC_STATS_CACHE.update(s)
+                _PC_STATS_CACHE["_at"] = time.time()
+                if name:
+                    globals()["_PC_NAME"] = name
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def _ensure_sys_refresher():
+    global _SYS_REFRESHER_STARTED
+    if _SYS_REFRESHER_STARTED:
+        return
+    _SYS_REFRESHER_STARTED = True
+    threading.Thread(target=_sys_refresher, daemon=True).start()
+
+
+def sys_stats():
+    """Windows-host PC stats from the warm cache (refreshed in the background);
+    falls back to /proc (the WSL VM) if PowerShell isn't reachable. `name` is
+    the Windows computer name, fetched once and cached forever."""
+    _ensure_sys_refresher()
+    cache = _PC_STATS_CACHE
+    if not cache:
+        # Cold start: one synchronous fetch so the first read isn't empty.
+        try:
+            s = _pc_sys_stats()
+            if s:
+                name = s.pop("name", None)
+                cache.update(s)
+                cache["_at"] = time.time()
+                if name:
+                    globals()["_PC_NAME"] = name
+        except Exception:  # noqa: BLE001
+            pass
+    if not cache:
+        # PowerShell unavailable — fall back to /proc (the WSL VM itself).
+        up, dn = _net_rate_kbps()
+        return {"cpu": _cpu_pct(), "mem": _mem_pct(), "disk": _disk_pct(),
+                "nup": up, "ndn": dn}
+    out = {k: cache[k] for k in ("cpu", "mem", "disk", "dr", "dw", "nup", "ndn")}
+    if _PC_NAME:
+        out["name"] = _PC_NAME
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# Cost — OpenRouter pricing + local Claude/Codex session logs
+# --------------------------------------------------------------------------- #
+OPENROUTER_MODELS_URL = "https://openrouter.ai/api/v1/models"
+_PRICE_CACHE_VERSION = 1
+_PRICE_REFRESH_S = 6 * 60 * 60
+_PRICE_RETRY_S = 5 * 60
+_PRICE_UNKNOWN_REFRESH_S = 60 * 60
+
+# Last-good offline snapshot in USD per million tokens:
+# (input, output, cache_write, cache_read). OpenRouter is the live source; this
+# table only keeps the display useful on first launch without network access.
+_FALLBACK_PRICING = {
+    "openai/gpt-5.6-sol": (5, 30, 6.25, 0.50),
+    "openai/gpt-5.6-terra": (1, 6, 1.25, 0.10),
+    "openai/gpt-5.6-luna": (0.10, 0.60, 0.125, 0.01),
+    "anthropic/claude-opus-4-8": (5, 25, 6.25, 0.50),
+    "anthropic/claude-opus-4-7": (5, 25, 6.25, 0.50),
+    "anthropic/claude-opus-4-6": (5, 25, 6.25, 0.50),
+    "anthropic/claude-opus-4-5": (5, 25, 6.25, 0.50),
+    "anthropic/claude-sonnet-4-6": (3, 15, 3.75, 0.30),
+    "anthropic/claude-sonnet-4-5": (3, 15, 3.75, 0.30),
+    "anthropic/claude-haiku-4-5": (1, 5, 1.25, 0.10),
+    "openai/gpt-5.5": (5, 30, 5, 0.50),
+    "openai/gpt-5.4": (2.5, 15, 2.5, 0.25),
+    "openai/gpt-5.2": (1.75, 14, 1.75, 0.175),
+    "openai/gpt-5.4-mini": (0.75, 4.5, 0.75, 0.075),
+    "openai/gpt-5-codex": (1.25, 10, 1.25, 0.125),
 }
 
+_PRICE_LOCK = threading.Lock()
+_PRICE_CATALOG = {}
+_PRICE_CATALOG_FETCHED_AT = 0.0
+_PRICE_CATALOG_LOADED = False
+_PRICE_CATALOG_SOURCE = "embedded"
+_PRICE_LAST_ATTEMPT = 0.0
+_PRICE_LAST_ERROR = None
+_PRICE_UNKNOWN_ATTEMPTS = {}
+_PRICE_FALLBACK_MODELS = set()
+_PRICE_UNPRICED_MODELS = set()
 
-def _canonical_model(raw):
-    # Strip a trailing date suffix "-XXXXXXXX" (dash + 8 digits).
-    if len(raw) > 9 and raw[-9] == "-" and raw[-8:].isdigit():
-        return raw[:-9]
-    return raw
+
+def _price_cache_path():
+    override = os.environ.get("CC_PRICING_CACHE", "").strip()
+    if override:
+        return os.path.expanduser(override)
+    root = os.environ.get("XDG_CACHE_HOME", "").strip()
+    if root:
+        return os.path.join(
+            os.path.expanduser(root), "cc-island", "openrouter-pricing.json"
+        )
+    if sys.platform == "darwin":
+        return os.path.expanduser("~/Library/Caches/cc-island/openrouter-pricing.json")
+    return os.path.expanduser("~/.cache/cc-island/openrouter-pricing.json")
 
 
-def _cost(model, in_, out, cc, cr):
-    r = _PRICING.get(_canonical_model(model))
-    if not r:
+def _price_refresh_seconds():
+    try:
+        hours = float(os.environ.get("CC_PRICING_REFRESH_HOURS", "6"))
+        if not math.isfinite(hours):
+            return _PRICE_REFRESH_S
+        return max(5 * 60, hours * 60 * 60)
+    except ValueError:
+        return _PRICE_REFRESH_S
+
+
+def _parse_openrouter_pricing(obj):
+    """Return OpenAI/Anthropic rates per million tokens from /api/v1/models."""
+    if not isinstance(obj, dict) or not isinstance(obj.get("data"), list):
+        return {}
+
+    def per_token(value):
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return None
+        return number if number >= 0 and math.isfinite(number) else None
+
+    result = {}
+    for model in obj["data"]:
+        if not isinstance(model, dict):
+            continue
+        model_id = model.get("id")
+        if (not isinstance(model_id, str)
+                or not model_id.startswith(("openai/", "anthropic/"))):
+            continue
+        pricing = model.get("pricing") or {}
+        prompt = per_token(pricing.get("prompt"))
+        completion = per_token(pricing.get("completion"))
+        if prompt is None or completion is None:
+            continue
+        cache_read = per_token(pricing.get("input_cache_read"))
+        cache_write = per_token(pricing.get("input_cache_write"))
+        # If OpenRouter does not publish a separate cache category, charge it
+        # as ordinary input rather than silently treating those tokens as free.
+        cache_read = prompt if cache_read is None else cache_read
+        cache_write = prompt if cache_write is None else cache_write
+        result[model_id] = tuple(
+            value * 1_000_000
+            for value in (prompt, completion, cache_write, cache_read)
+        )
+    return result
+
+
+def _load_price_cache_unlocked():
+    global _PRICE_CATALOG, _PRICE_CATALOG_FETCHED_AT
+    global _PRICE_CATALOG_LOADED, _PRICE_CATALOG_SOURCE
+    _PRICE_CATALOG_LOADED = True
+    try:
+        with open(_price_cache_path()) as f:
+            saved = json.load(f)
+        if not isinstance(saved, dict):
+            return
+        if saved.get("version") != _PRICE_CACHE_VERSION:
+            return
+        models = {}
+        for model_id, values in (saved.get("models") or {}).items():
+            valid_shape = (
+                isinstance(model_id, str)
+                and isinstance(values, list)
+                and len(values) == 4
+            )
+            if not valid_shape:
+                continue
+            rates = tuple(float(value) for value in values)
+            if all(value >= 0 and math.isfinite(value) for value in rates):
+                models[model_id] = rates
+        if models:
+            _PRICE_CATALOG = models
+            _PRICE_CATALOG_FETCHED_AT = float(saved.get("fetched_at") or 0)
+            _PRICE_CATALOG_SOURCE = "disk-cache"
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return
+
+
+def _save_price_cache_unlocked():
+    path = _price_cache_path()
+    tmp = f"{path}.tmp-{os.getpid()}"
+    try:
+        directory = os.path.dirname(path)
+        if directory:
+            os.makedirs(directory, exist_ok=True)
+        with open(tmp, "w") as f:
+            json.dump({
+                "version": _PRICE_CACHE_VERSION,
+                "source": OPENROUTER_MODELS_URL,
+                "fetched_at": _PRICE_CATALOG_FETCHED_AT,
+                "models": {key: list(value) for key, value in _PRICE_CATALOG.items()},
+            }, f, separators=(",", ":"), sort_keys=True)
+        os.replace(tmp, path)
+    except OSError:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+
+
+def _ensure_price_catalog(force=False):
+    """Load the last-good catalog and refresh it at most every six hours."""
+    global _PRICE_CATALOG, _PRICE_CATALOG_FETCHED_AT, _PRICE_CATALOG_SOURCE
+    global _PRICE_LAST_ATTEMPT, _PRICE_LAST_ERROR
+    now = time.time()
+    with _PRICE_LOCK:
+        if not _PRICE_CATALOG_LOADED:
+            _load_price_cache_unlocked()
+        fresh = (_PRICE_CATALOG and
+                 now - _PRICE_CATALOG_FETCHED_AT < _price_refresh_seconds())
+        if fresh and not force:
+            return _PRICE_CATALOG
+        if now - _PRICE_LAST_ATTEMPT < _PRICE_RETRY_S:
+            return _PRICE_CATALOG
+        _PRICE_LAST_ATTEMPT = now
+        status, obj = _http(
+            "GET", OPENROUTER_MODELS_URL,
+            headers={"Accept": "application/json", "User-Agent": "cc-island/1"},
+        )
+        models = _parse_openrouter_pricing(obj)
+        if status == 200 and models:
+            _PRICE_CATALOG = models
+            _PRICE_CATALOG_FETCHED_AT = now
+            _PRICE_CATALOG_SOURCE = "openrouter"
+            _PRICE_LAST_ERROR = None
+            _save_price_cache_unlocked()
+        else:
+            detail = (obj or {}).get("_transport_error") if isinstance(obj, dict) else None
+            _PRICE_LAST_ERROR = detail or f"OpenRouter HTTP {status}"
+        return _PRICE_CATALOG
+
+
+def _strip_model_date(model):
+    return re.sub(r"-(?:\d{8}|\d{4}-\d{2}-\d{2})$", "", model)
+
+
+def _openrouter_claude_id(model):
+    # Anthropic logs use claude-opus-4-6 / claude-3-5-sonnet while OpenRouter
+    # uses claude-opus-4.6 / claude-3.5-sonnet.
+    model = re.sub(r"^(claude-(?:opus|sonnet|haiku)-\d+)-(\d+)", r"\1.\2", model)
+    return re.sub(r"^(claude-\d+)-(\d+)(-.+)$", r"\1.\2\3", model)
+
+
+def _model_price_candidates(provider, raw):
+    raw = (raw or "").strip().lstrip("~")
+    if not raw:
+        return []
+    if "/" in raw:
+        provider_id, model = raw.split("/", 1)
+    else:
+        provider_id, model = provider, raw
+    candidates = []
+
+    def add(model_id):
+        key = f"{provider_id}/{model_id}"
+        if key not in candidates:
+            candidates.append(key)
+        if provider_id == "anthropic":
+            key = f"{provider_id}/{_openrouter_claude_id(model_id)}"
+            if key not in candidates:
+                candidates.append(key)
+
+    add(model)
+    canonical = _strip_model_date(model)
+    if canonical != model:
+        add(canonical)
+    if provider_id == "openai" and model == "codex-auto-review":
+        fallback = os.environ.get("CC_CODEX_FALLBACK_MODEL", "gpt-5.6-sol").strip()
+        if fallback and fallback != model:
+            if "/" in fallback:
+                fallback_provider, fallback = fallback.split("/", 1)
+                provider_id = fallback_provider
+            add(fallback)
+    return candidates
+
+
+def _price_rates(provider, model):
+    candidates = _model_price_candidates(provider, model)
+    catalog = _ensure_price_catalog()
+    for candidate in candidates:
+        if candidate in catalog:
+            return catalog[candidate]
+
+    # A newly released model should not wait for the normal six-hour refresh.
+    key = candidates[0] if candidates else f"{provider}/{model}"
+    now = time.time()
+    if catalog and now - _PRICE_UNKNOWN_ATTEMPTS.get(key, 0) >= _PRICE_UNKNOWN_REFRESH_S:
+        _PRICE_UNKNOWN_ATTEMPTS[key] = now
+        catalog = _ensure_price_catalog(force=True)
+        for candidate in candidates:
+            if candidate in catalog:
+                return catalog[candidate]
+
+    for candidate in candidates:
+        if candidate in _FALLBACK_PRICING:
+            _PRICE_FALLBACK_MODELS.add(candidate)
+            return _FALLBACK_PRICING[candidate]
+    if key not in _PRICE_UNPRICED_MODELS:
+        _PRICE_UNPRICED_MODELS.add(key)
+        print(f"WARN: no OpenRouter price for {key}; dollar estimate excludes it",
+              file=sys.stderr)
+    return None
+
+
+def _cost(provider, model, in_, out, cache_write, cache_read):
+    rates = _price_rates(provider, model)
+    if not rates:
         return 0.0
-    return (in_ * r[0] + out * r[1] + cc * r[2] + cr * r[3]) / 1_000_000
+    return (in_ * rates[0] + out * rates[1]
+            + cache_write * rates[2] + cache_read * rates[3]) / 1_000_000
+
+
+def pricing_status():
+    catalog = _ensure_price_catalog()
+    out = {
+        "source": _PRICE_CATALOG_SOURCE if catalog else "embedded",
+        "url": OPENROUTER_MODELS_URL,
+        "updated_at": (
+            int(_PRICE_CATALOG_FETCHED_AT) if _PRICE_CATALOG_FETCHED_AT else None
+        ),
+        "models": len(catalog),
+    }
+    if _PRICE_FALLBACK_MODELS:
+        out["fallback_models"] = sorted(_PRICE_FALLBACK_MODELS)
+    if _PRICE_UNPRICED_MODELS:
+        out["unpriced_models"] = sorted(_PRICE_UNPRICED_MODELS)
+    if _PRICE_LAST_ERROR:
+        out["refresh_error"] = _PRICE_LAST_ERROR
+    return out
 
 
 def _today_midnight():
@@ -368,7 +966,7 @@ def cost_claude(midnight):
                     cr = u.get("cache_read_input_tokens", 0) or 0
                     if not (i or out or cc or cr):
                         continue
-                    cost += _cost(model, i, out, cc, cr)
+                    cost += _cost("anthropic", model, i, out, cc, cr)
                     tokens += i + out + cc + cr
         except OSError:
             continue
@@ -378,12 +976,17 @@ def cost_claude(midnight):
 def cost_codex(midnight):
     import glob
     cost, tokens = 0.0, 0
+    snapshot_fields = (
+        "input_tokens", "cached_input_tokens", "cache_write_input_tokens",
+        "output_tokens", "reasoning_output_tokens", "total_tokens",
+    )
     pat = os.path.expanduser("~/.codex/sessions/**/rollout-*.jsonl")
     for path in glob.glob(pat, recursive=True):
         try:
             if os.path.getmtime(path) < midnight - 86400:
                 continue
             cur_model = None
+            previous_usage_snapshot = None
             with open(path, "rb") as f:
                 for line in f:
                     try:
@@ -401,26 +1004,150 @@ def cost_codex(midnight):
                     p = o.get("payload") or {}
                     if p.get("type") != "token_count":
                         continue
-                    last = (p.get("info") or {}).get("last_token_usage") or {}
-                    if not last or _parse_ts(o.get("timestamp", "")) < midnight:
+                    info = p.get("info") or {}
+                    last = info.get("last_token_usage") or {}
+                    total = info.get("total_token_usage") or {}
+                    if not last:
+                        continue
+                    # Codex can emit the same cumulative usage snapshot again
+                    # after status/tool events. Count each completed model call
+                    # once, while still allowing identical per-call usage when
+                    # the cumulative total has advanced.
+                    if total:
+                        snapshot = tuple(int(total.get(k, 0) or 0)
+                                         for k in snapshot_fields)
+                        if snapshot == previous_usage_snapshot:
+                            continue
+                        previous_usage_snapshot = snapshot
+                    if _parse_ts(o.get("timestamp", "")) < midnight:
                         continue
                     ti = last.get("input_tokens", 0) or 0
                     cached = last.get("cached_input_tokens", 0) or 0
-                    nonc = max(0, ti - cached)
+                    cache_write = last.get("cache_write_input_tokens", 0) or 0
+                    nonc = max(0, ti - cached - cache_write)
                     out = last.get("output_tokens", 0) or 0
-                    if not (nonc or cached or out):
+                    if not (nonc or cached or cache_write or out):
                         continue
-                    cost += _cost(cur_model or "gpt-5.4", nonc, out, 0, cached)
-                    tokens += nonc + out + cached
+                    cost += _cost("openai", cur_model or "gpt-5.4",
+                                  nonc, out, cache_write, cached)
+                    tokens += nonc + cached + cache_write + out
         except OSError:
             continue
     return cost, tokens
 
 
 # --------------------------------------------------------------------------- #
+# OpenCode Go — dashboard scrape for subscription quota (5h / weekly / monthly)
+#
+# OpenCode has no public usage API; the community approach is to scrape the
+# workspace Go dashboard, which embeds the numbers in SolidJS SSR hydration
+# output. Needs an `auth` cookie from your logged-in browser session — it
+# expires periodically, so re-export it when auth fails.
+# --------------------------------------------------------------------------- #
+_OC_GO_URL = "https://opencode.ai/workspace/{ws}/go"
+_OC_GO_UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+             "Gecko/20100101 Firefox/148.0")
+_OC_GO_REFRESH_TTL = 5 * 60
+_OC_GO_CACHE = {}
+_OC_GO_CACHE_AT = 0.0
+_OC_GO_CACHE_KEY = None
+_OC_GO_LOCK = threading.Lock()
+
+
+def _extract_go_window(html, field):
+    """Pull `usagePercent` + `resetInSec` out of a SolidJS `$R[n]={...}` literal."""
+    import re
+    m = re.search(re.escape(field) + r'\s*:\s*\$R\[\d+\]\s*=\s*\{', html)
+    if not m:
+        return None
+    start = m.end() - 1
+    depth, i, in_str, esc = 0, start, None, False
+    while i < len(html):
+        c = html[i]
+        if in_str:
+            if esc:
+                esc = False
+            elif c == "\\":
+                esc = True
+            elif c == in_str:
+                in_str = None
+        elif c in ("\"", "'", "`"):
+            in_str = c
+        elif c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                lit = html[start:i + 1]
+                break
+        i += 1
+    else:
+        return None
+    up = re.search(r'usagePercent\s*:\s*(-?\d+(?:\.\d+)?)', lit)
+    rs = re.search(r'resetInSec\s*:\s*(-?\d+(?:\.\d+)?)', lit)
+    if not up or not rs:
+        return None
+    return float(up.group(1)), float(rs.group(1))
+
+
+def fetch_opencode_go(workspace_id, auth_cookie):
+    """Return h/hr, w/wr, m/mr — quota percentages and reset minutes."""
+    if not workspace_id or not auth_cookie:
+        return {"error": "go config missing"}
+    url = _OC_GO_URL.format(ws=workspace_id)
+    req = urllib.request.Request(url, headers={
+        "Cookie": f"auth={auth_cookie}",
+        "User-Agent": _OC_GO_UA,
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=15, context=_SSL_CTX) as resp:
+            html = resp.read().decode("utf-8", "replace")
+    except Exception as e:  # noqa: BLE001
+        return {"error": f"go: {e}"}
+    out = {}
+    for field, key in (("rollingUsage", "h"), ("weeklyUsage", "w"),
+                       ("monthlyUsage", "m")):
+        win = _extract_go_window(html, field)
+        if win:
+            pct, reset = win
+            out[key] = int(round(max(0.0, min(100.0, pct))))
+            out[key + "r"] = int(max(0, round(reset / 60)))
+    if not out:
+        return {"error": "go: parse failed (page format changed?)"}
+    return out
+
+
+def _cached_opencode_go(config):
+    """Avoid scraping the OpenCode Go dashboard on every 30-second refresh."""
+    global _OC_GO_CACHE, _OC_GO_CACHE_AT, _OC_GO_CACHE_KEY
+    workspace_id = config.get("workspace_id")
+    auth_cookie = config.get("auth_cookie")
+    cache_key = (workspace_id, auth_cookie)
+    now = time.time()
+    with _OC_GO_LOCK:
+        if (_OC_GO_CACHE_KEY == cache_key and _OC_GO_CACHE
+                and now - _OC_GO_CACHE_AT < _OC_GO_REFRESH_TTL):
+            return dict(_OC_GO_CACHE)
+        result = fetch_opencode_go(workspace_id, auth_cookie)
+        _OC_GO_CACHE = dict(result)
+        _OC_GO_CACHE_AT = now
+        _OC_GO_CACHE_KEY = cache_key
+        return result
+
+
+# --------------------------------------------------------------------------- #
 # Combine + render
 # --------------------------------------------------------------------------- #
-def collect():
+_DATA_CACHE = {}
+_DATA_REFRESH_TTL = 30
+_DATA_REFRESHER_STARTED = False
+_opencode_db_arg = None
+_opencode_go_arg = None
+
+
+def _collect_providers(opencode_db, opencode_go):
+    """Fetch providers + local costs only (no sys). Can take many seconds."""
     midnight = _today_midnight()
     claude = fetch_claude()
     codex = fetch_codex()
@@ -428,11 +1155,55 @@ def collect():
     cx_cost, cx_tok = cost_codex(midnight)
     claude["cost_today"], claude["tokens_today"] = round(cc_cost, 2), cc_tok
     codex["cost_today"], codex["tokens_today"] = round(cx_cost, 2), cx_tok
+    opencode = fetch_opencode(opencode_db)
+    if opencode_go is not None:
+        opencode["go"] = _cached_opencode_go(opencode_go)
     return {
         "ts": int(time.time()),
         "claude": claude,
         "codex": codex,
+        "opencode": opencode,
+        "pricing": pricing_status(),
     }
+
+
+def _data_refresher():
+    global _DATA_CACHE
+    while True:
+        time.sleep(_DATA_REFRESH_TTL)
+        try:
+            _DATA_CACHE = _collect_providers(_opencode_db_arg, _opencode_go_arg)
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def _ensure_data_refresher():
+    global _DATA_REFRESHER_STARTED
+    if _DATA_REFRESHER_STARTED:
+        return
+    _DATA_REFRESHER_STARTED = True
+    threading.Thread(target=_data_refresher, daemon=True).start()
+
+
+def collect(opencode_db=None, opencode_go=None):
+    """Providers come from the background-refreshed cache (instant); sys comes
+    from the warm PC-stats cache when enabled. Only the very first call may
+    block on a slow network fetch."""
+    global _opencode_db_arg, _opencode_go_arg, _DATA_CACHE
+    _opencode_db_arg = opencode_db
+    _opencode_go_arg = opencode_go
+    _ensure_data_refresher()
+    if _DATA_CACHE:
+        data = dict(_DATA_CACHE)
+        if system_monitor_enabled():
+            data["sys"] = sys_stats()
+        data["ts"] = int(time.time())
+        return data
+    data = _collect_providers(opencode_db, opencode_go)
+    _DATA_CACHE = dict(data)
+    if system_monitor_enabled():
+        data["sys"] = sys_stats()
+    return data
 
 
 def _fmt_window(w):
@@ -461,12 +1232,160 @@ def render(data):
         lines.append(f"{title:12}{plan}")
         lines.append(f"   5h   {_fmt_window(p.get('five_hour'))}")
         lines.append(f"   7d   {_fmt_window(p.get('weekly'))}")
-        lines.append(f"   today  ${p.get('cost_today', 0):.2f}   {p.get('tokens_today', 0):,} tok")
+        lines.append(f"   today  ~${p.get('cost_today', 0):.2f}   {p.get('tokens_today', 0):,} tok")
+
+    oc = data["opencode"]
+    if "error" in oc:
+        lines.append(f"{'OpenCode':10} ⚠ {oc['error']}")
+    else:
+        go = oc.get("go")
+        if isinstance(go, dict) and "h" in go:
+            h, w, m = go.get("h", 0), go.get("w", 0), go.get("m", 0)
+            reset = go.get("hr", 0)
+            lines.append("OpenCode Go  ")
+            lines.append(f"   5h   {h}%   reset {reset // 60}h{reset % 60:02d}m")
+            lines.append(f"   weekly {w}%   monthly {m}%")
+        else:
+            lines.append("OpenCode  ")
+        lines.append(f"   today  ~${oc.get('t', 0):.2f}   {oc.get('T', 0):,} tok   {oc.get('s', 0)} ses")
+        lines.append(f"   7d     ~${oc.get('d', 0):.2f}")
+    if go_err := (oc.get("go") or {}).get("error"):
+        lines.append(f"   (go: {go_err})")
+
+    s = data.get("sys")
+    if isinstance(s, dict):
+        lines.append("  System")
+        lines.append(
+            f"   cpu {s.get('cpu')}%  mem {s.get('mem')}%  disk {s.get('disk')}%"
+        )
+        lines.append(f"   net up {s.get('nup')}K/s  dn {s.get('ndn')}K/s")
     return "\n".join(lines)
 
 
 # --------------------------------------------------------------------------- #
-# BLE push — send the compact payload to the StopWatch over Nordic UART Service
+# Watch payload — compact JSON the firmware understands
+# --------------------------------------------------------------------------- #
+def _win_pct(w):
+    return int(round(w["pct"])) if w else 0
+
+
+def _reset_min(w):
+    if not w or not w.get("reset_at"):
+        return 0
+    return max(0, int((w["reset_at"] - time.time()) / 60))
+
+
+def _window_prov(p, include_cost=True):
+    if "error" in p:
+        return {"error": p["error"][:24]}
+    fh = p.get("five_hour")
+    wk = p.get("weekly")
+    out = {
+        "h": _win_pct(fh),
+        "hr": _reset_min(fh),
+        "hw": int(fh.get("window_seconds", 0)) if fh else 0,
+        "w": _win_pct(wk) if wk else -1,   # -1 = no secondary window
+        "wr": _reset_min(wk) if wk else 0,
+        "ww": int(wk.get("window_seconds", 0)) if wk else 0,
+    }
+    if include_cost:
+        out["$"] = round(p.get("cost_today", 0), 2)
+        out["t"] = int(p.get("tokens_today", 0))
+    return out
+
+
+def compact(data):
+    """Short-key one-line JSON for the watch.
+
+      c, x  window-based providers (Claude/Codex): {h: 5h pct, w: 7d pct,
+            hr: 5h reset mins, wr: 7d reset mins, $: today $, t: today tok}
+      o     OpenCode: {t: today $, T: today tok, s: sessions, d: 7d $,
+            plus h/hr/w/wr/m/mr when the Go quota scrape is configured
+            (5h/weekly/monthly usage % and per-window reset mins)}
+      sys   system: {name, cpu, mem, disk, dr, dw, nup, ndn}  (rates in KB/s)
+    """
+    raw_o = data["opencode"]
+    if "error" in raw_o:
+        o = {"error": raw_o["error"][:24]}
+    else:
+        # Whitelist watch fields and never mutate the shared provider cache.
+        o = {key: raw_o[key] for key in ("t", "T", "s", "d") if key in raw_o}
+        go = raw_o.get("go")
+        if isinstance(go, dict):
+            for k in ("h", "hr", "w", "wr", "m", "mr"):
+                if k in go:
+                    o[k] = go[k]
+    payload = {
+        "c": _window_prov(data["claude"]),
+        "x": _window_prov(data["codex"]),
+        "o": o,
+    }
+    s = data.get("sys")
+    if isinstance(s, dict):
+        system = {}
+        for k, v in s.items():
+            if k == "name":
+                system["name"] = v if isinstance(v, str) else str(v)
+            else:
+                system[k] = (None if v is None else round(v, 1))
+        payload["sys"] = system
+    return json.dumps(payload, separators=(",", ":"))
+
+
+# --------------------------------------------------------------------------- #
+# WiFi polling server
+# --------------------------------------------------------------------------- #
+def serve(port, host="0.0.0.0", opencode_db=None, opencode_go=None):
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass  # quiet — the poll loop is chatty enough
+
+        def _send(self, code, body, ctype="application/json"):
+            data = body.encode() if isinstance(body, str) else body
+            self.send_response(code)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(data)
+
+        def do_GET(self):
+            try:
+                data = collect(opencode_db, opencode_go)
+            except Exception as e:  # noqa: BLE001 — keep the server alive
+                return self._send(500, json.dumps({"error": str(e)}))
+            path = self.path.split("?", 1)[0]
+            if path == "/stats":
+                return self._send(200, compact(data))
+            if path == "/json":
+                return self._send(200, json.dumps(data, indent=2))
+            return self._send(200, render(data), "text/plain")
+
+    httpd = ThreadingHTTPServer((host, port), Handler)
+    print(f"serving WiFi polling on http://{host}:{port}  (Ctrl-C to stop)")
+    print("  GET /stats → compact watch JSON")
+    print("  GET /json  → full JSON")
+    print("  GET /      → human readable")
+    # Warm the caches once before serving so the watch never hits a cold,
+    # multi-second poll (first network fetch can take a while).
+    print("warming caches...")
+    try:
+        collect(opencode_db, opencode_go)
+        if system_monitor_enabled():
+            sys_stats()
+        print("caches warm")
+    except Exception as e:  # noqa: BLE001
+        print("warm-up failed (will retry in background):", e)
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        pass
+
+
+# --------------------------------------------------------------------------- #
+# BLE push — Nordic UART Service (the original transport)
 # --------------------------------------------------------------------------- #
 NUS_RX_UUID = "6e400002-b5a3-f393-e0a9-e50e24dcca9e"   # Mac -> watch (usage JSON)
 NUS_TX_UUID = "6e400003-b5a3-f393-e0a9-e50e24dcca9e"   # watch -> Mac (refresh request)
@@ -478,31 +1397,7 @@ RECONNECT_DELAY_S = 3
 MAX_STALE_PROVIDER_S = 6 * 60 * 60
 
 
-def _win_pct(w):
-    return int(round(w["pct"])) if w else 0
-
-
-def _reset_min(w):
-    if not w or not w.get("reset_at"):
-        return 0
-    return max(0, int((w["reset_at"] - time.time()) / 60))
-
-
-def compact(data):
-    """Short-key one-line JSON for the watch: c/x -> {h,d,r,$,t}."""
-    def prov(p):
-        return {
-            "h": _win_pct(p.get("five_hour")),
-            "d": _win_pct(p.get("weekly")),
-            "r": _reset_min(p.get("five_hour")),
-            "$": round(p.get("cost_today", 0), 2),
-            "t": int(p.get("tokens_today", 0)),
-        }
-    return json.dumps({"c": prov(data["claude"]), "x": prov(data["codex"])},
-                      separators=(",", ":"))
-
-
-async def ble_loop(interval_s):
+async def ble_loop(interval_s, opencode_db=None, opencode_go=None):
     import asyncio
     from bleak import BleakClient, BleakScanner
 
@@ -513,9 +1408,9 @@ async def ble_loop(interval_s):
 
     def remember_good(data):
         now = time.time()
-        for name in ("claude", "codex"):
+        for name in ("claude", "codex", "opencode"):
             provider = data.get(name) or {}
-            if "error" not in provider and provider.get("five_hour") and provider.get("weekly"):
+            if "error" not in provider:
                 cached = dict(provider)
                 cached["_cached_at"] = now
                 last_good[name] = cached
@@ -523,14 +1418,11 @@ async def ble_loop(interval_s):
     def with_cached_windows(data):
         now = time.time()
         merged = dict(data)
-        for name in ("claude", "codex"):
+        for name in ("claude", "codex", "opencode"):
             provider = dict(data.get(name) or {})
             cached = last_good.get(name)
             if "error" in provider and cached and now - cached.get("_cached_at", 0) <= MAX_STALE_PROVIDER_S:
                 restored = {k: v for k, v in cached.items() if not k.startswith("_")}
-                restored["cost_today"] = provider.get("cost_today", restored.get("cost_today", 0))
-                restored["tokens_today"] = provider.get("tokens_today", restored.get("tokens_today", 0))
-                restored["stale"] = True
                 merged[name] = restored
             else:
                 merged[name] = provider
@@ -544,23 +1436,7 @@ async def ble_loop(interval_s):
             service_uuids = [u.lower() for u in (adv.service_uuids or [])]
             return name == BLE_DEVICE_NAME or target_uuid in service_uuids
 
-        dev = await BleakScanner.find_device_by_filter(match, timeout=SCAN_TIMEOUT_S)
-        if dev:
-            return dev
-
-        # Diagnostic fallback: list visible named devices without failing the loop.
-        try:
-            seen = await BleakScanner.discover(timeout=5, return_adv=True)
-            names = []
-            for _, (device, adv) in seen.items():
-                name = device.name or adv.local_name
-                if name:
-                    names.append(name)
-            if names:
-                print("  visible BLE names:", ", ".join(sorted(set(names))[:12]))
-        except Exception as e:  # noqa: BLE001
-            print("  scan diagnostic failed:", e)
-        return None
+        return await BleakScanner.find_device_by_filter(match, timeout=SCAN_TIMEOUT_S)
 
     async def connect_watch(dev):
         disconnected.clear()
@@ -579,7 +1455,7 @@ async def ble_loop(interval_s):
         return client
 
     async def push(client, tag):
-        data = collect()
+        data = collect(opencode_db, opencode_go)
         remember_good(data)
         payload = compact(with_cached_windows(data))
         try:
@@ -603,7 +1479,6 @@ async def ble_loop(interval_s):
                 client = await connect_watch(dev)
                 await push(client, "connect")
 
-            # Wake on either the periodic timer or a button-triggered refresh.
             try:
                 refresh_task = asyncio.create_task(refresh.wait())
                 disconnect_task = asyncio.create_task(disconnected.wait())
@@ -642,22 +1517,77 @@ async def ble_loop(interval_s):
             await asyncio.sleep(RECONNECT_DELAY_S)
 
 
+# --------------------------------------------------------------------------- #
+# CLI
+# --------------------------------------------------------------------------- #
+def _load_env_file():
+    """Load a gitignored .env from the repo root (or CWD) if present. Keys set
+    in the real environment win — .env only fills the gaps."""
+    for base in (os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                 os.getcwd()):
+        path = os.path.join(base, ".env")
+        if not os.path.exists(path):
+            continue
+        try:
+            with open(path) as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith("#") or "=" not in line:
+                        continue
+                    key, _, val = line.partition("=")
+                    key, val = key.strip(), val.strip()
+                    if key and key not in os.environ:
+                        os.environ[key] = val
+            print(f"loaded env from {path}")
+        except OSError:
+            pass
+        break
+
+
+def _resolve_opencode_go(args):
+    """Prefer --go-* flags, fall back to OPENCODE_GO_* env vars."""
+    ws = args.go_workspace or os.environ.get("OPENCODE_GO_WORKSPACE_ID", "").strip()
+    ck = args.go_cookie or os.environ.get("OPENCODE_GO_AUTH_COOKIE", "").strip()
+    if ws and ck:
+        return {"workspace_id": ws, "auth_cookie": ck}
+    if ws or ck:
+        print("WARN: need BOTH OPENCODE_GO_WORKSPACE_ID and OPENCODE_GO_AUTH_COOKIE "
+              "to fetch the Go quota (falling back to local usage only)",
+              file=sys.stderr)
+    return None
+
+
 def main():
-    if "--ble" in sys.argv:
-        import asyncio
-        i = sys.argv.index("--ble")
-        mins = 5.0
-        if i + 1 < len(sys.argv):
-            try:
-                mins = float(sys.argv[i + 1])
-            except ValueError:
-                pass
-        print(f"BLE push every {mins:g} min (Ctrl-C to stop)")
-        asyncio.run(ble_loop(int(mins * 60)))
+    _load_env_file()
+
+    parser = argparse.ArgumentParser(description="CC Island StopWatch bridge")
+    parser.add_argument("--json", action="store_true", help="one-shot full JSON")
+    parser.add_argument("--serve", nargs="?", const=8080, type=int, metavar="PORT",
+                        help="WiFi polling HTTP server (default port 8080)")
+    parser.add_argument("--ble", nargs="?", const=5, type=float, metavar="MINS",
+                        help="BLE push every N minutes (needs bleak)")
+    parser.add_argument("--db", metavar="PATH", default=None,
+                        help="opencode SQLite db path (default ~/.local/share/opencode/opencode.db)")
+    parser.add_argument("--go-workspace", metavar="WRK_ID", default=None,
+                        help="OpenCode Go workspace id (or OPENCODE_GO_WORKSPACE_ID)")
+    parser.add_argument("--go-cookie", metavar="AUTH_COOKIE", default=None,
+                        help="OpenCode Go 'auth' cookie from the browser (or OPENCODE_GO_AUTH_COOKIE)")
+    args = parser.parse_args()
+
+    go = _resolve_opencode_go(args)
+
+    if args.serve is not None:
+        serve(args.serve, opencode_db=args.db, opencode_go=go)
         return
 
-    data = collect()
-    if "--json" in sys.argv:
+    if args.ble is not None:
+        print(f"BLE push every {args.ble:g} min (Ctrl-C to stop)")
+        import asyncio
+        asyncio.run(ble_loop(int(args.ble * 60), opencode_db=args.db, opencode_go=go))
+        return
+
+    data = collect(args.db, go)
+    if args.json:
         print(json.dumps(data, indent=2))
     else:
         print(render(data))

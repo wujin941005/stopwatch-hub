@@ -30,14 +30,89 @@ echo "==> Fetching firmware dependencies..."
 
 # 3. Drop in the CC Island app + generated brand-logo bitmaps.
 echo "==> Copying app_codex + assets..."
-mkdir -p "$TARGET/main/apps/app_codex/ble" "$TARGET/main/assets/images"
+mkdir -p "$TARGET/main/apps/app_codex/ble" "$TARGET/main/apps/app_codex/net" "$TARGET/main/apps/app_codex/debug" "$TARGET/main/assets/images"
 cp "$REPO_ROOT"/firmware/app_codex/app_codex.h          "$TARGET/main/apps/app_codex/"
 cp "$REPO_ROOT"/firmware/app_codex/app_codex.cpp        "$TARGET/main/apps/app_codex/"
+cp "$REPO_ROOT"/firmware/app_codex/app_codex_config.h   "$TARGET/main/apps/app_codex/"
 cp "$REPO_ROOT"/firmware/app_codex/ble/ble_nus.h        "$TARGET/main/apps/app_codex/ble/"
 cp "$REPO_ROOT"/firmware/app_codex/ble/ble_nus.cpp      "$TARGET/main/apps/app_codex/ble/"
+cp "$REPO_ROOT"/firmware/app_codex/net/net.h            "$TARGET/main/apps/app_codex/net/"
+cp "$REPO_ROOT"/firmware/app_codex/net/net.cpp          "$TARGET/main/apps/app_codex/net/"
+cp "$REPO_ROOT"/firmware/app_codex/net/net_config.h     "$TARGET/main/apps/app_codex/net/"
+cp "$REPO_ROOT"/firmware/app_codex/debug/debug_screenshot.h   "$TARGET/main/apps/app_codex/debug/"
+cp "$REPO_ROOT"/firmware/app_codex/debug/debug_screenshot.cpp "$TARGET/main/apps/app_codex/debug/"
 cp "$REPO_ROOT"/firmware/assets/logo_claude.c           "$TARGET/main/assets/images/"
 cp "$REPO_ROOT"/firmware/assets/logo_codex.c            "$TARGET/main/assets/images/"
-cp "$REPO_ROOT"/firmware/assets/icon_codex.c            "$TARGET/main/assets/images/"
+cp "$REPO_ROOT"/firmware/assets/logo_opencode.c         "$TARGET/main/assets/images/"
+cp "$REPO_ROOT"/firmware/assets/icon_cc_island.c        "$TARGET/main/assets/images/"
+# Remove the pre-CC-Island launcher asset when upgrading an existing checkout.
+rm -f "$TARGET/main/assets/images/icon_codex.c"
+
+# 3b. Bake WiFi + bridge settings from the gitignored .env (if present) into
+#     the copied net_config.h. Without .env, the committed placeholders stay.
+echo "==> Applying .env network settings (if present)..."
+python3 - "$REPO_ROOT" "$TARGET" <<'PY'
+import os, re, sys, pathlib
+root, target = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
+env = {}
+env_path = root / ".env"
+if env_path.exists():
+    for line in env_path.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, _, v = line.partition("=")
+        env[k.strip()] = v.strip()
+
+def cstr(s):
+    return s.replace("\\", "\\\\").replace('"', '\\"')
+
+cfg = root / "firmware/app_codex/net/net_config.h"
+text = cfg.read_text()
+if "CC_WIFI_SSID" in env and env.get("CC_WIFI_SSID"):
+    text = re.sub(r'\.ssid\s*=\s*"[^"]*"',
+                  f'.ssid    = "{cstr(env["CC_WIFI_SSID"])}"', text)
+if "CC_WIFI_PASSWORD" in env and env.get("CC_WIFI_PASSWORD"):
+    text = re.sub(r'\.password\s*=\s*"[^"]*"',
+                  f'.password = "{cstr(env["CC_WIFI_PASSWORD"])}"', text)
+if "CC_BRIDGE_HOST" in env and env.get("CC_BRIDGE_HOST"):
+    text = re.sub(r'\.host\s*=\s*"[^"]*"',
+                  f'.host    = "{cstr(env["CC_BRIDGE_HOST"])}"', text)
+if "CC_BRIDGE_PORT" in env and env.get("CC_BRIDGE_PORT"):
+    text = re.sub(r'\.port\s*=\s*\d+',
+                  f'.port    = {env["CC_BRIDGE_PORT"]}', text)
+if "CC_POLL_MS" in env and env.get("CC_POLL_MS"):
+    text = re.sub(r'\.poll_ms\s*=\s*\d+',
+                  f'.poll_ms = {env["CC_POLL_MS"]}', text)
+(target / "main/apps/app_codex/net/net_config.h").write_text(text)
+
+# app_codex_config.h: page layout, optional system monitor, auto-switch interval
+cfg2 = root / "firmware/app_codex/app_codex_config.h"
+text2 = cfg2.read_text()
+
+def env_bool(name):
+    value = env[name].strip().lower()
+    if value in {"1", "true", "yes", "on"}:
+        return True
+    if value in {"0", "false", "no", "off"}:
+        return False
+    raise SystemExit(f"{name} must be true/false, got {env[name]!r}")
+
+if "CC_LAYOUT" in env and env.get("CC_LAYOUT"):
+    pages = env["CC_LAYOUT"].strip().lower() == "pages"
+    text2 = re.sub(r'kLayoutPages\s*=\s*(true|false)',
+                   f'kLayoutPages = {"true" if pages else "false"}', text2)
+if "CC_SYSTEM_MONITOR" in env and env.get("CC_SYSTEM_MONITOR"):
+    enabled = env_bool("CC_SYSTEM_MONITOR")
+    text2 = re.sub(r'kShowSystemPage\s*=\s*(true|false)',
+                   f'kShowSystemPage = {"true" if enabled else "false"}', text2)
+if "CC_AUTO_SWITCH_MS" in env and env.get("CC_AUTO_SWITCH_MS") is not None:
+    text2 = re.sub(r'kAutoSwitchMs\s*=\s*\d+',
+                   f'kAutoSwitchMs = {env["CC_AUTO_SWITCH_MS"]}', text2)
+(target / "main/apps/app_codex/app_codex_config.h").write_text(text2)
+print("   net_config.h updated from .env" if "CC_WIFI_SSID" in env else
+      "   no .env — keeping placeholder net_config.h")
+PY
 
 # 4. Apply the small, idempotent edits to the factory sources.
 echo "==> Registering the app (idempotent edits)..."
@@ -71,20 +146,34 @@ insert_after("main/main.cpp",
              "GetMooncake().installApp(std::make_unique<AppSetup>());",
              "    GetMooncake().installApp(std::make_unique<AppCodex>());")
 
-# assets.h: declare the three images
+# assets.h: declare the images
+assets_h = root / "main/assets/assets.h"
+assets_text = assets_h.read_text().replace(
+    "LV_IMG_DECLARE(icon_codex);", "LV_IMG_DECLARE(icon_cc_island);")
+assets_h.write_text(assets_text)
+
 insert_after("main/assets/assets.h",
              "LV_IMG_DECLARE(icon_watch_face);",
-             "LV_IMG_DECLARE(icon_codex);\n"
+             "LV_IMG_DECLARE(icon_cc_island);\n"
              "LV_IMG_DECLARE(logo_claude);\n"
-             "LV_IMG_DECLARE(logo_codex);")
+             "LV_IMG_DECLARE(logo_codex);\n"
+             "LV_IMG_DECLARE(logo_opencode);")
 
-# sdkconfig.defaults: enable NimBLE
+# sdkconfig.defaults: enable NimBLE (BLE transport) + Wi-Fi (polling transport)
 sdk = root / "sdkconfig.defaults"
 txt = sdk.read_text()
 if "CONFIG_BT_NIMBLE_ENABLED=y" not in txt:
     sdk.write_text(txt.rstrip() + "\n\n# BLE (NimBLE) for CC Island usage push\n"
                    "CONFIG_BT_ENABLED=y\nCONFIG_BT_NIMBLE_ENABLED=y\n")
-    print("   patched sdkconfig.defaults")
+    print("   patched sdkconfig.defaults (NimBLE)")
+if "CONFIG_ESP_WIFI_ENABLED=y" not in sdk.read_text():
+    sdk.write_text(sdk.read_text().rstrip() + "\n# Wi-Fi (CC Island polling transport)\n"
+                   "CONFIG_ESP_WIFI_ENABLED=y\n")
+    print("   patched sdkconfig.defaults (Wi-Fi)")
+if "CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=8192" not in sdk.read_text():
+    sdk.write_text(sdk.read_text().rstrip() + "\n# Wi-Fi + NimBLE coexist needs a bigger event task\n"
+                   "CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=8192\n")
+    print("   patched sdkconfig.defaults (event task stack)")
 PY
 
 cat <<EOF

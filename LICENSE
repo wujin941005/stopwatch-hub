@@ -23,6 +23,6 @@ SOFTWARE.
 ---
 
 Note: The Anthropic/Claude and OpenAI brand logos included as bitmap assets
-(firmware/assets/logo_claude.c, logo_codex.c, icon_codex.c) are trademarks of
+(firmware/assets/logo_claude.c and logo_codex.c) are trademarks of
 their respective owners and are used only to identify those services. This MIT
 license covers the source code, not those third-party marks.
