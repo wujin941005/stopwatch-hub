@@ -22,12 +22,84 @@ class ProviderTests(unittest.TestCase):
             "_transport_error":
                 "<urlopen error [Errno 101] Network is unreachable>"
         }
-        with mock.patch("builtins.open", mock.mock_open(read_data=auth)), \
+        with mock.patch.object(bridge, "_codex_roots", return_value=["/tmp/.codex"]), \
+                mock.patch("builtins.open", mock.mock_open(read_data=auth)), \
                 mock.patch.object(bridge, "_http", return_value=(0, transport)):
             self.assertEqual(
                 bridge.fetch_codex(),
                 {"error": "network unreachable"},
             )
+
+    def test_claude_credentials_file_supports_linux_and_windows(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / ".credentials.json"
+            path.write_text(json.dumps({
+                "claudeAiOauth": {
+                    "accessToken": "access",
+                    "refreshToken": "refresh",
+                    "subscriptionType": "max",
+                },
+            }))
+            with mock.patch.object(bridge, "_claude_roots", return_value=[tmpdir]):
+                creds = bridge._read_claude_file_creds()
+            self.assertEqual(creds["source"], "file")
+            self.assertEqual(creds["oauth"]["accessToken"], "access")
+
+    def test_claude_credentials_refresh_is_written_back_atomically(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / ".credentials.json"
+            path.write_text(json.dumps({
+                "unrelated": {"keep": True},
+                "claudeAiOauth": {"accessToken": "old"},
+            }))
+            oauth = {
+                "accessToken": "new-access",
+                "refreshToken": "new-refresh",
+                "expiresAt": 123,
+            }
+
+            self.assertTrue(bridge._write_claude_file_creds(str(path), oauth))
+            saved = json.loads(path.read_text())
+            self.assertEqual(saved["unrelated"], {"keep": True})
+            self.assertEqual(saved["claudeAiOauth"], oauth)
+            self.assertEqual(list(Path(tmpdir).glob("*.tmp")), [])
+
+
+class PlatformPathTests(unittest.TestCase):
+    def test_windows_paths_are_translated_when_bridge_runs_in_wsl(self):
+        with mock.patch.object(bridge, "_is_wsl", return_value=True):
+            self.assertEqual(
+                bridge._windows_to_wsl_path(
+                    r"C:\Users\Alice\.local\share\opencode\opencode.db"
+                ),
+                "/mnt/c/Users/Alice/.local/share/opencode/opencode.db",
+            )
+
+    def test_opencode_database_uses_xdg_then_channel_fallbacks(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data = Path(tmpdir) / "data" / "opencode"
+            data.mkdir(parents=True)
+            beta = data / "opencode-beta.db"
+            beta.touch()
+            with mock.patch.dict(
+                os.environ,
+                {"XDG_DATA_HOME": str(Path(tmpdir) / "data")},
+                clear=True,
+            ), mock.patch.object(bridge, "_host_homes", return_value=[]):
+                self.assertEqual(bridge._find_opencode_db(), str(beta))
+
+                stable = data / "opencode.db"
+                stable.touch()
+                self.assertEqual(bridge._find_opencode_db(), str(stable))
+
+    def test_explicit_opencode_database_wins(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "custom.db"
+            path.touch()
+            with mock.patch.dict(
+                os.environ, {"OPENCODE_DB": str(path)}, clear=True
+            ):
+                self.assertEqual(bridge._find_opencode_db(), str(path))
 
 
 class PricingTests(unittest.TestCase):
@@ -259,6 +331,36 @@ class SystemMonitorTests(unittest.TestCase):
             stats.assert_called_once_with()
         finally:
             bridge._DATA_CACHE = previous_cache
+
+    def test_macos_vm_stat_parser(self):
+        output = """Mach Virtual Memory Statistics: (page size of 4096 bytes)\nPages free: 10.\nPages active: 60.\nPages inactive: 20.\nPages speculative: 5.\n"""
+        self.assertEqual(bridge._parse_vm_stat(output, 100 * 4096), 65.0)
+
+    def test_platform_system_backend_dispatch(self):
+        mac = {"name": "Mac", "cpu": 1}
+        with mock.patch.object(bridge.os, "name", "posix"), \
+                mock.patch.object(bridge.sys, "platform", "darwin"), \
+                mock.patch.object(bridge, "_is_wsl", return_value=False), \
+                mock.patch.object(bridge, "_macos_sys_stats", return_value=mac):
+            self.assertEqual(bridge._collect_system_stats(), mac)
+
+        native_windows = {"name": "PC", "cpu": 2}
+        with mock.patch.object(bridge.os, "name", "nt"), \
+                mock.patch.object(
+                    bridge, "_psutil_sys_stats", return_value=native_windows
+                ) as psutil_stats, \
+                mock.patch.object(bridge, "_windows_sys_stats") as powershell:
+            self.assertEqual(bridge._collect_system_stats(), native_windows)
+            psutil_stats.assert_called_once_with()
+            powershell.assert_not_called()
+
+        wsl_windows = {"name": "PC", "cpu": 3}
+        with mock.patch.object(bridge.os, "name", "posix"), \
+                mock.patch.object(bridge, "_is_wsl", return_value=True), \
+                mock.patch.object(
+                    bridge, "_windows_sys_stats", return_value=wsl_windows
+                ):
+            self.assertEqual(bridge._collect_system_stats(), wsl_windows)
 
 
 if __name__ == "__main__":

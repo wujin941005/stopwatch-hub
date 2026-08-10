@@ -1,0 +1,43 @@
+name: Bridge tests
+
+on:
+  push:
+    paths:
+      - ".github/workflows/bridge-tests.yml"
+      - "bridge/**"
+      - "tests/**"
+      - "pyproject.toml"
+      - "uv.lock"
+  pull_request:
+    paths:
+      - ".github/workflows/bridge-tests.yml"
+      - "bridge/**"
+      - "tests/**"
+      - "pyproject.toml"
+      - "uv.lock"
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Python (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v9
+        with:
+          enable-cache: true
+      - name: Install Python
+        run: uv python install 3.11
+      - name: Sync locked environment
+        run: uv sync --frozen --python 3.11
+      - name: Compile bridge
+        run: uv run --frozen python -m py_compile bridge/codexisland_bridge.py tests/test_bridge.py
+      - name: Run unit tests
+        run: uv run --frozen python -m unittest discover -s tests -v

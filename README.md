@@ -36,17 +36,43 @@ bridge reads the credentials your CLIs already wrote, queries the providers' own
 endpoints, computes local statistics, and sends only the finished numbers to
 the watch over Bluetooth LE or Wi‑Fi HTTP.
 
+## Project lineage
+
+This maintained fork is based on
+[alexjc-tech/cc-island](https://github.com/alexjc-tech/cc-island). Its firmware
+foundation comes from M5Stack's
+[M5StopWatch-UserDemo](https://github.com/m5stack/M5StopWatch-UserDemo), while
+the AI-usage companion concept and the original provider-auth recipes were
+adapted from Eric Park's
+[CodexIsland](https://github.com/ericjypark/codex-island). These links represent
+the direct upstream, firmware foundation, and product inspiration respectively.
+
 ## Pick a setup
 
 | Goal | Transport | `.env` | Host support |
 | --- | --- | --- | --- |
-| AI usage only | Wi‑Fi | `CC_SYSTEM_MONITOR=false` | WSL/Windows, Linux, macOS |
-| AI usage + PC health | Wi‑Fi | `CC_SYSTEM_MONITOR=true` | WSL/Windows or Linux |
-| Original low-frequency push | BLE | `CC_SYSTEM_MONITOR=false` | macOS |
+| AI usage only | Wi‑Fi | `CC_SYSTEM_MONITOR=false` | Windows, macOS, Linux, WSL |
+| AI usage + host health | Wi‑Fi | `CC_SYSTEM_MONITOR=true` | Windows, macOS, Linux, WSL |
+| Low-frequency push | BLE (`bleak`) | either | Windows, macOS, Linux |
 
 For the most complete experience, use `CC_LAYOUT=pages`, Wi‑Fi polling, and
 optionally enable the System page. Use `rows` if you prefer the original dense
 two-provider face. BLE and Wi‑Fi can coexist in one firmware image.
+
+### Platform support
+
+| Capability | Windows | macOS | Linux |
+| --- | --- | --- | --- |
+| Codex auth + local logs | `~/.codex` | `~/.codex` | `~/.codex` |
+| Claude auth + local logs | `~/.claude/.credentials.json` | Keychain, then credentials file | `~/.claude/.credentials.json` |
+| OpenCode local usage | XDG data / `opencode.db` | XDG data / `opencode.db` | XDG data / `opencode.db` |
+| Host metrics | `psutil`, with PowerShell fallback | `psutil`, with native fallback | `psutil`, with `/proc` fallback |
+| Wi‑Fi polling | Yes | Yes | Yes |
+| BLE push | Yes | Yes | Yes (BlueZ required) |
+
+When the bridge runs in WSL it also checks the mounted Windows profile for all
+three CLIs, so an OpenCode installed on Windows is supported. Custom locations
+remain explicit through `CODEX_HOME`, `CLAUDE_CONFIG_DIR`, and `OPENCODE_DB`.
 
 ---
 
@@ -78,8 +104,9 @@ OpenCode Go, or another subscription are not charged this amount per token.
 The optional **System** page shows the bridge host's name, CPU %, memory %,
 disk usage and read/write rate, plus network upload/download. Under WSL the
 bridge reads the Windows host through PowerShell and falls back to the WSL VM's
-`/proc` metrics when interop is unavailable. Linux uses `/proc` directly;
-macOS host metrics are not yet complete, so the default is disabled.
+metrics when interop is unavailable. Native Windows, macOS, and Linux use
+`psutil`, with PowerShell, native-command, or `/proc` fallbacks respectively.
+Monitoring remains opt-in because it is independent from AI usage tracking.
 
 Swipe left/right to change pages. The **orange button** toggles auto/manual page
 rotation, and the **blue button** requests an immediate refresh. Set
@@ -97,13 +124,13 @@ rotation, and the **blue button** requests an immediate refresh. Set
 ## Architecture
 
 ```
-  PC / Mac (the brain)                           StopWatch / "CC Island" app (the face)
+  Windows / macOS / Linux (the brain)            StopWatch / "CC Island" app (the face)
   ─────────────────────────────                  ──────────────────────────────────────
   bridge/codexisland_bridge.py                   firmware/app_codex
    • Claude/Codex endpoints + local logs          • rows or per-provider pages (LVGL)
    • OpenRouter model-price catalog (cached)       • API-equivalent value (~$)
    • OpenCode SQLite + optional Go quota           • swipe + auto/manual page rotation
-   • Windows host stats via WSL, /proc fallback    • optional host-system page
+   • native host stats + WSL Windows integration   • optional host-system page
    • 30 s provider cache / 4 s system refresh      • Wi-Fi polling + BLE NUS receiver
    • GET /stats ─────────HTTP (Wi‑Fi)──────────▶   • blue button → immediate refresh
    • compact JSON push ───BLE (NUS)────────────▶   • threshold-crossing vibration
@@ -118,7 +145,9 @@ computed numbers do.
 
 ```
 cc-island/
-├── bridge/codexisland_bridge.py   # data + BLE push + HTTP serve (pure Python)
+├── bridge/codexisland_bridge.py   # data + BLE push + HTTP server
+├── pyproject.toml                 # bridge metadata + dependencies
+├── uv.lock                        # reproducible Windows/macOS/Linux environment
 ├── firmware/
 │   ├── app_codex/                 # the StopWatch app (drops into factory fw)
 │   │   ├── app_codex.{h,cpp}       #   provider/system UI, gestures, page rotation
@@ -151,6 +180,7 @@ The same `.env` contains build-time watch settings and runtime bridge settings:
 | `CC_LAYOUT`, `CC_AUTO_SWITCH_MS` | firmware installer | Yes | No |
 | `CC_SYSTEM_MONITOR` | firmware installer + bridge | Yes | Yes |
 | `OPENCODE_GO_*`, `OPENCODE_DB` | bridge | No | Yes |
+| `CODEX_HOME`, `CLAUDE_CONFIG_DIR` | bridge | No | Yes |
 | `CC_PRICING_*`, `CC_CODEX_FALLBACK_MODEL` | bridge | No | Yes |
 
 Provider secrets are not copied into the firmware. Codex and Claude reuse the
@@ -181,10 +211,18 @@ On the watch, open the **CC Island** app once after boot to start its transports
 
 ### 2. Run the bridge
 
-Wi‑Fi mode (recommended for WSL / LAN; zero third‑party dependencies):
+Install [uv](https://docs.astral.sh/uv/getting-started/installation/) once,
+then create the locked environment. The same command works in Windows
+PowerShell, macOS, and Linux:
 
-```bash
-python3 bridge/codexisland_bridge.py --serve 8080
+```console
+uv sync
+```
+
+Wi‑Fi mode is recommended on every platform:
+
+```console
+uv run python bridge/codexisland_bridge.py --serve 8080
 ```
 
 The bridge loads `.env` automatically. OpenCode local usage needs no extra
@@ -194,18 +232,22 @@ System page; rerun the firmware install/build/flash after changing it.
 Check `http://localhost:8080/` for text, `/json` for full data, or `/stats` for
 the compact watch payload.
 
-BLE mode (Mac, original behavior):
+BLE mode (Windows / macOS / Linux through `bleak`):
 
-```bash
-# one-time: install as a background service that starts at login
-./scripts/setup_autostart.sh            # default: refresh every 5 min
+```console
+uv run python bridge/codexisland_bridge.py --ble 5
 ```
 
-The first run triggers a macOS **Bluetooth permission** prompt — click **Allow**.
 The bridge finds the watch (named `CC Island`), connects, and starts pushing.
+macOS prompts for Bluetooth permission; Linux needs a working BlueZ/D-Bus
+session. The bundled login-service installer is currently macOS-specific:
 
-> Prefer to run it by hand? `python3 bridge/codexisland_bridge.py --ble 5`
-> (or `--json` / no args to just print the numbers).
+```bash
+./scripts/setup_autostart.sh            # macOS, default: every 5 min
+```
+
+Use `--json` or no arguments to inspect provider data without starting a
+transport.
 
 ---
 
@@ -243,9 +285,13 @@ The bridge finds the watch (named `CC Island`), connects, and starts pushing.
   `OPENCODE_GO_AUTH_COOKIE`, or `--go-workspace` / `--go-cookie`.
 - **Refresh interval (BLE)** — argument to the bridge (`--ble <minutes>`), or edit the
   LaunchAgent.
-- **Real framebuffer screenshot** — install `pyserial` and Pillow, connect USB,
-  then run `python3 tools/screenshot.py out.png --port /dev/ttyACM0`. Developers
-  can add `--advance 1` (or `-1`) to switch pages before capture.
+- **Real framebuffer screenshot** — connect USB, then run:
+
+  ```console
+  uv run --with pyserial --with pillow python tools/screenshot.py out.png --port /dev/ttyACM0
+  ```
+
+  Developers can add `--advance 1` (or `-1`) to switch pages before capture.
 - **Launcher icon / provider logos** — `cc_island.svg` is CC Island's independent
   launcher mark; the other SVGs identify individual providers. Regenerate all
   firmware bitmaps with:
@@ -263,14 +309,18 @@ The bridge finds the watch (named `CC Island`), connects, and starts pushing.
 ## How it works (data sources)
 
 - **Codex**: `GET https://chatgpt.com/backend-api/wham/usage` with the
-  `access_token` from `~/.codex/auth.json`. Today's cost from
-  `~/.codex/sessions/**/rollout-*.jsonl`.
+  `access_token` from `CODEX_HOME/auth.json` (normally `~/.codex/auth.json`).
+  Today's cost comes from its session JSONL files. In WSL the Windows profile
+  is also auto-detected.
 - **Claude**: `GET https://api.anthropic.com/api/oauth/usage` with a Claude Code
-  token (env → Keychain `Claude Code-credentials` → OAuth refresh) plus the CLI
-  `User-Agent` and `anthropic-beta` header. On non‑macOS hosts this reports
-  "auth required".
-- **OpenCode**: read-only SQLite query of
-  `~/.local/share/opencode/opencode.db`. Today's and 7-day values sum each
+  token (`CLAUDE_CODE_OAUTH_TOKEN` → macOS Keychain →
+  `CLAUDE_CONFIG_DIR/.credentials.json` → OAuth refresh) plus the CLI
+  `User-Agent` and `anthropic-beta` header. Linux and Windows therefore reuse
+  the login already written by Claude Code.
+- **OpenCode**: read-only SQLite query of its official XDG data directory,
+  normally `~/.local/share/opencode/opencode.db` on all three platforms.
+  Stable, beta, and development database names are auto-detected. Today's and
+  7-day values sum each
   assistant message's own `cost` and token counters by message time, so a
   session continued across midnight remains accurate. Override the path with
   `OPENCODE_DB` or `--db`; older schemas fall back to session aggregates. This
@@ -283,10 +333,12 @@ The bridge finds the watch (named `CC Island`), connects, and starts pushing.
   cookie (the community approach). Results are cached for five minutes. The
   cookie starts with `Fe26.2**` and expires periodically — re-export it from
   **F12 → Application → Cookies → https://opencode.ai → `auth`** when auth fails.
-- **System** (optional): when `CC_SYSTEM_MONITOR=true`, reads the **host PC's**
-  CPU / memory / disk / network via PowerShell over WSL interop (refreshed
-  ~4 s), falling back to `/proc` when PowerShell isn't reachable. When false,
-  the bridge neither collects these metrics nor includes `sys` in its payloads.
+- **System** (optional): when `CC_SYSTEM_MONITOR=true`, reads CPU / memory /
+  disk / network from native Windows, macOS, or Linux; WSL targets the Windows
+  host first through PowerShell. `psutil` supplies full cross-platform disk and
+  network rates, while Windows PowerShell, macOS native commands, and Linux
+  `/proc` remain fallbacks. When false, the bridge neither samples these metrics
+  nor includes `sys`.
 - **Cost**: parses `~/.claude/projects/**/*.jsonl` and
   `~/.codex/sessions/**/rollout-*.jsonl` for token usage and prices each turn
   from OpenRouter's frequently updated public catalog. Only that public catalog
@@ -308,10 +360,10 @@ OpenCode, Wi-Fi polling, system monitoring, and navigation live in this project.
   bridge is reachable from the watch's network (`curl http://<host>:<port>/stats`
   from a phone on the same AP); see the WSL networking section below.
 - **Bridge can't find the watch** — open the CC Island app on the watch (BLE
-  only advertises after the first app open per boot); make sure the bridge has
-  macOS Bluetooth permission.
-- **`SSL: CERTIFICATE_VERIFY_FAILED`** — the python.org Python ships no CA store;
-  `pip install --user certifi` (the bridge already prefers it).
+  only advertises after the first app open per boot); check Bluetooth permission
+  on Windows/macOS or BlueZ/D-Bus access on Linux.
+- **`SSL: CERTIFICATE_VERIFY_FAILED`** — rerun `uv sync`; the locked environment
+  includes `certifi`, and the bridge prefers its CA bundle.
 - **Firmware build: `nimble/nimble_port.h: No such file`** — BLE isn't enabled;
   delete the **root** `sdkconfig` (not `build/sdkconfig`) and `idf.py reconfigure`.
 - **Linker: `undefined reference to AppCodex`** after adding files — `idf.py
@@ -320,6 +372,15 @@ OpenCode, Wi-Fi polling, system monitoring, and navigation live in this project.
   `ninja` is dragging the toolchain to x86_64; `brew install ninja` and put
   `/opt/homebrew/bin` first on `PATH`.
 - **Go quota auth errors** — the `auth` cookie expired; re‑export it.
+- **A CLI works but the bridge says auth/database missing** — the CLI and bridge
+  are using different homes (common with WSL, services, `sudo`, or custom XDG
+  paths). Set `CODEX_HOME`, `CLAUDE_CONFIG_DIR`, or `OPENCODE_DB` explicitly.
+- **Native Windows: the watch cannot reach Wi-Fi mode** — allow TCP port 8080
+  through Windows Defender Firewall (run PowerShell as administrator):
+
+  ```powershell
+  netsh advfirewall firewall add rule name="cc-island" dir=in action=allow protocol=TCP localport=8080
+  ```
 - **Codex shows `network unreachable` / `network timeout`** — this is a bridge
   transport problem, not expired Codex auth. Check the bridge process's proxy
   and DNS environment. In particular, `sudo` often removes `HTTP_PROXY`,
@@ -348,6 +409,8 @@ directly. Either:
 
 ## Credits & trademarks
 
+- Maintained fork of
+  [alexjc-tech/cc-island](https://github.com/alexjc-tech/cc-island) (MIT).
 - Built on M5Stack's [M5StopWatch‑UserDemo](https://github.com/m5stack/M5StopWatch-UserDemo) (MIT).
 - Inspired by [CodexIsland](https://github.com/ericjypark/codex-island) by Eric Park.
 - BLE legacy-advertising packet fix based on

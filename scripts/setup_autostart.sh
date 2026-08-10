@@ -13,12 +13,15 @@ LABEL="com.ccisland.bridge"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 LOG="$REPO_ROOT/bridge.log"
 
-# Use the python.org / system Python (CoreBluetooth works there), not a venv.
-PY="$(command -v python3)"
+UV="$(command -v uv || true)"
+if [[ -z "$UV" ]]; then
+  echo "ERROR: uv is required: https://docs.astral.sh/uv/getting-started/installation/" >&2
+  exit 1
+fi
 
-echo "==> Installing Python deps (bleak, certifi) for $PY ..."
-CERT="$("$PY" -c 'import certifi; print(certifi.where())' 2>/dev/null || true)"
-SSL_CERT_FILE="$CERT" "$PY" -m pip install --user --quiet bleak certifi
+echo "==> Syncing the locked bridge environment with $UV ..."
+"$UV" sync --project "$REPO_ROOT" --frozen --no-dev
+PY="$REPO_ROOT/.venv/bin/python"
 
 echo "==> Writing LaunchAgent $PLIST"
 mkdir -p "$HOME/Library/LaunchAgents"

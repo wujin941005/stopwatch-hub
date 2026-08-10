@@ -29,16 +29,40 @@ CC Island 把一块 **M5Stack StopWatch**（圆形 AMOLED，ESP32‑S3）变成 
 **本地优先，provider 凭证始终留在主机**：bridge 读取你 CLI 已经写好的凭证、查询各家官方用量接口、
 从本地会话日志计算统计，再把最终数字通过**蓝牙 BLE** 或 **Wi‑Fi HTTP** 传给手表。
 
+## 项目沿革
+
+这个持续维护的 fork 基于
+[alexjc-tech/cc-island](https://github.com/alexjc-tech/cc-island)。固件底座来自 M5Stack
+的 [M5StopWatch-UserDemo](https://github.com/m5stack/M5StopWatch-UserDemo)；AI 用量伴侣的
+产品思路和最初的 provider 鉴权方案则改编自 Eric Park 的
+[CodexIsland](https://github.com/ericjypark/codex-island)。三者分别代表直接上游、固件底座和
+产品灵感，因此在这里明确区分。
+
 ## 先选使用方式
 
 | 目标 | 传输 | `.env` | 主机支持 |
 | --- | --- | --- | --- |
-| 只看 AI 用量 | Wi‑Fi | `CC_SYSTEM_MONITOR=false` | WSL/Windows、Linux、macOS |
-| AI 用量 + 电脑监控 | Wi‑Fi | `CC_SYSTEM_MONITOR=true` | WSL/Windows 或 Linux |
-| 原版低频推送 | BLE | `CC_SYSTEM_MONITOR=false` | macOS |
+| 只看 AI 用量 | Wi‑Fi | `CC_SYSTEM_MONITOR=false` | Windows、macOS、Linux、WSL |
+| AI 用量 + 主机监控 | Wi‑Fi | `CC_SYSTEM_MONITOR=true` | Windows、macOS、Linux、WSL |
+| 低频推送 | BLE（`bleak`） | 均可 | Windows、macOS、Linux |
 
 功能最完整的组合是 `CC_LAYOUT=pages` + Wi‑Fi polling，再按需开启系统页；偏好原版
 高密度界面则使用 `rows`。同一份固件也可以同时保留 BLE 与 Wi‑Fi。
+
+### 三平台支持矩阵
+
+| 能力 | Windows | macOS | Linux |
+| --- | --- | --- | --- |
+| Codex 登录与本地日志 | `~/.codex` | `~/.codex` | `~/.codex` |
+| Claude 登录与本地日志 | `~/.claude/.credentials.json` | Keychain，再回退凭证文件 | `~/.claude/.credentials.json` |
+| OpenCode 本地用量 | XDG data / `opencode.db` | XDG data / `opencode.db` | XDG data / `opencode.db` |
+| 主机指标 | `psutil`，PowerShell 兜底 | `psutil`，原生命令兜底 | `psutil`，`/proc` 兜底 |
+| Wi‑Fi polling | 支持 | 支持 | 支持 |
+| BLE push | 支持 | 支持 | 支持（需要 BlueZ） |
+
+Bridge 运行在 WSL 时，还会自动检查挂载进来的 Windows 用户目录，因此 OpenCode
+安装在 Windows 上也能读取。自定义目录可以通过 `CODEX_HOME`、
+`CLAUDE_CONFIG_DIR`、`OPENCODE_DB` 明确指定。
 
 ## 显示内容
 
@@ -63,8 +87,8 @@ OpenRouter 当前公开价格目录折算；OpenCode 则直接采用它自己逐
 
 可选的**系统页**显示 bridge 主机的电脑名、CPU、内存、磁盘占用与读写速率、网络
 上下行。运行在 WSL 时优先通过 PowerShell 读取 Windows 主机，互操作不可用时才回退
-到 WSL 虚拟机的 `/proc` 数据；Linux 直接读取 `/proc`。macOS 主机指标尚未完整支持，
-因此示例配置默认关闭。
+到 WSL 虚拟机。原生 Windows、macOS 与 Linux 使用 `psutil`，并分别保留 PowerShell、
+原生命令和 `/proc` 兜底。系统监控仍默认关闭，因为它和 AI 用量是独立功能。
 
 左右滑动可切页；**橙色按钮**切换 `AUTO` / `MAN` 自动或手动轮播；**蓝色按钮**
 请求立即刷新。设置 `CC_AUTO_SWITCH_MS=0` 可让固件默认从手动模式启动。
@@ -72,11 +96,11 @@ OpenRouter 当前公开价格目录折算；OpenCode 则直接采用它自己逐
 ## 架构
 
 ```
-  PC / Mac（大脑）                               手表 / CC Island app（脸）
+  Windows / macOS / Linux（大脑）                手表 / CC Island app（脸）
   bridge/codexisland_bridge.py                   firmware/app_codex
    · Claude/Codex 接口 + 本地日志                  · 双行或 provider 独立页面（LVGL）
    · OpenCode SQLite + 可选 Go 配额                · 滑动 + 自动/手动轮播
-   · WSL 读取 Windows 主机，/proc 回退              · 可选主机系统页
+   · 三平台原生指标 + WSL Windows 集成               · 可选主机系统页
    · provider 缓存 30 秒 / 系统约 4 秒             · Wi-Fi polling + BLE NUS 接收
    · GET /stats ─────────HTTP (Wi‑Fi)─────────▶   · 蓝键立即刷新
    · 紧凑 JSON 推送 ───蓝牙(NUS)──────────────▶   · 过阈值振动
@@ -97,6 +121,7 @@ API 凭证和 Cookie 都不会传到手表**，只传算好的数字。
 | `CC_LAYOUT`、`CC_AUTO_SWITCH_MS` | 固件安装脚本 | 要 | 不要 |
 | `CC_SYSTEM_MONITOR` | 固件安装脚本 + bridge | 要 | 要 |
 | `OPENCODE_GO_*`、`OPENCODE_DB` | bridge | 不要 | 要 |
+| `CODEX_HOME`、`CLAUDE_CONFIG_DIR` | bridge | 不要 | 要 |
 | `CC_PRICING_*`、`CC_CODEX_FALLBACK_MODEL` | bridge | 不要 | 要 |
 
 provider 密钥不会写入固件。Codex、Claude 复用 bridge 主机已有的 CLI 登录凭证；
@@ -115,10 +140,17 @@ OpenCode Cookie 始终留在 bridge 主机。刷完后在表上**打开一次 CC
 
 **2. 跑 bridge（两种模式，任选其一）**
 
-Wi‑Fi 模式（推荐 WSL / 局域网用，零第三方依赖）：
+先安装一次 [uv](https://docs.astral.sh/uv/getting-started/installation/)，再创建锁定的
+运行环境。Windows PowerShell、macOS、Linux 使用相同命令：
 
-```bash
-python3 bridge/codexisland_bridge.py --serve 8080
+```console
+uv sync
+```
+
+Wi‑Fi 模式三平台均推荐：
+
+```console
+uv run python bridge/codexisland_bridge.py --serve 8080
 ```
 
 bridge 会自动读取 `.env`。OpenCode 本地用量无需额外配置；可选的 `OPENCODE_GO_*`
@@ -126,14 +158,14 @@ bridge 会自动读取 `.env`。OpenCode 本地用量无需额外配置；可选
 修改后需重新运行安装脚本、编译并刷入固件。浏览器可访问 `/` 看文本、`/json` 看完整
 数据、`/stats` 看手表载荷。
 
-蓝牙模式（Mac，开机自启）：
+蓝牙模式（通过 `bleak` 支持 Windows / macOS / Linux）：
 
-```bash
-./scripts/setup_autostart.sh           # 默认每 5 分钟刷新一次
+```console
+uv run python bridge/codexisland_bridge.py --ble 5
 ```
-首次运行 macOS 会弹**蓝牙权限**窗口 → 点【允许】。之后它自动连上手表并推送。
 
-> 想手动跑：`python3 bridge/codexisland_bridge.py --ble 5`（或 `--json` 只打印数字）。
+macOS 首次运行会弹蓝牙权限；Linux 需要可用的 BlueZ/D-Bus。仓库自带的登录自启脚本
+目前只负责 macOS：`./scripts/setup_autostart.sh`。使用 `--json` 或不带参数可只检查数据。
 
 ## 使用
 
@@ -158,9 +190,13 @@ bridge 会自动读取 `.env`。OpenCode 本地用量无需额外配置；可选
 - **配色 / 告警阈值** — `firmware/app_codex/app_codex.cpp`
   （`kClaudeColor` / `kCodexColor` / `kOpencodeColor` / `kAlertThreshold`）
 - **Go 配额配置** — 环境变量 `OPENCODE_GO_WORKSPACE_ID` / `OPENCODE_GO_AUTH_COOKIE`
-- **真机帧缓冲截图** — 安装 `pyserial` 与 Pillow，USB 连接后运行
-  `python3 tools/screenshot.py out.png --port /dev/ttyACM0`；开发调试时加
-  `--advance 1`（或 `-1`）可在截图前切换页面
+- **真机帧缓冲截图** — USB 连接后运行：
+
+  ```console
+  uv run --with pyserial --with pillow python tools/screenshot.py out.png --port /dev/ttyACM0
+  ```
+
+  开发调试时加 `--advance 1`（或 `-1`）可在截图前切换页面
 - **启动图标 / provider Logo** — `firmware/tools/cc_island.svg` 是 CC Island
   自己的三色监控图标；其他 SVG 只用于标识 provider。运行下面命令可重新生成固件位图：
   ```bash
@@ -175,18 +211,21 @@ bridge 会自动读取 `.env`。OpenCode 本地用量无需额外配置；可选
 
 ## 数据来源与金额口径
 
-- **Codex**：使用 `~/.codex/auth.json` 中的 access token 读取用量窗口，并解析
-  `~/.codex/sessions/**/rollout-*.jsonl` 统计今天的 token
-- **Claude Code**：读取官方用量接口；今天的 token 来自
-  `~/.claude/projects/**/*.jsonl`
-- **OpenCode**：只读查询 `~/.local/share/opencode/opencode.db`，按 assistant message
-  的发生时间直接汇总 OpenCode 自己记录的 `cost` 和各类 token，因此跨日继续旧
-  session 也不会漏算；该金额不会再经过 OpenRouter 价格表二次估算。旧数据库结构
-  会回退到 session 累计值。配置 `OPENCODE_GO_*` 后才会额外读取 Go 订阅窗口，并
-  缓存 5 分钟
-- **系统指标（可选）**：仅在 `CC_SYSTEM_MONITOR=true` 时采集；WSL 环境优先通过
-  PowerShell 读取 Windows 主机，失败后回退 `/proc`。关闭时 Bridge 不采集，也不会在
-  payload 中发送 `sys`
+- **Codex**：使用 `CODEX_HOME/auth.json`（默认 `~/.codex/auth.json`）中的 access
+  token 读取用量窗口，并解析 session JSONL 统计今天的 token；WSL 还会自动检查
+  Windows 用户目录
+- **Claude Code**：复用 `CLAUDE_CODE_OAUTH_TOKEN`、macOS Keychain 或
+  `CLAUDE_CONFIG_DIR/.credentials.json`（默认 `~/.claude/.credentials.json`）读取官方
+  用量接口；今天的 token 来自各平台 `~/.claude/projects/**/*.jsonl`
+- **OpenCode**：只读查询官方 XDG data 目录，三平台通常都是
+  `~/.local/share/opencode/opencode.db`，也会识别 beta/dev channel 数据库；可用
+  `OPENCODE_DB` 或 `--db` 覆盖。Bridge 按 assistant message 的发生时间直接汇总
+  OpenCode 自己记录的 `cost` 和各类 token，因此跨日继续旧 session 也不会漏算；
+  该金额不会再经过 OpenRouter 价格表二次估算。旧数据库结构会回退到 session 累计值。
+  配置 `OPENCODE_GO_*` 后才会额外读取 Go 订阅窗口，并缓存 5 分钟
+- **系统指标（可选）**：仅在 `CC_SYSTEM_MONITOR=true` 时采集；原生 Windows、macOS、
+  Linux 使用 `psutil`，并有平台原生兜底。WSL 优先通过 PowerShell 读取 Windows 主机，
+  失败后才显示 WSL 自身。关闭时 Bridge 不采集，也不会在 payload 中发送 `sys`
 - **`~$` 等效价值**：Claude/Codex 按 OpenRouter 动态模型目录估算，不是 Coding Plan
   或订阅账单；bridge 只下载公开价格目录，不会上送本地凭证、prompt 或 usage。先精确
   匹配模型，再处理日期/provider 别名与离线兜底；仍未识别的模型继续计入 token，并在
@@ -199,13 +238,23 @@ bridge 会自动读取 `.env`。OpenCode 本地用量无需额外配置；可选
 
 ## 常见问题
 
-- **bridge 找不到手表** → 先在表上打开 CC Island app（每次重启后首次打开才开始广播）；确认 Mac 给了蓝牙权限。
+- **bridge 找不到手表** → 先在表上打开 CC Island app（每次重启后首次打开才开始广播）；
+  检查 Windows/macOS 蓝牙权限，Linux 则检查 BlueZ 与 D-Bus。
 - **Wi‑Fi 模式手表空白** → 确认 bridge 在手表同一网络可达（手机上 `curl http://<host>:<port>/stats` 试试）；检查下面的 WSL 网络打通。
-- **`SSL: CERTIFICATE_VERIFY_FAILED`** → python.org 的 Python 没装 CA 证书：`pip install --user certifi`。
+- **`SSL: CERTIFICATE_VERIFY_FAILED`** → 重新执行 `uv sync`；锁定环境已包含
+  `certifi`，bridge 会优先使用它的 CA 证书包。
 - **编译报 `nimble/nimble_port.h` 找不到** → BLE 没启用：删**项目根目录**的 `sdkconfig`（不是 build/ 里的）再 `idf.py reconfigure`。
 - **链接报 `undefined reference to AppCodex`** → 新增文件后跑一次 `idf.py reconfigure`。
 - **Apple 芯片报 `incompatible architecture`** → Intel 版 ninja 把工具链拖成 x86_64：`brew install ninja`，并把 `/opt/homebrew/bin` 放到 PATH 最前。
 - **Go 配额报鉴权错误** → `auth` cookie 过期了：重新 F12 导出一次。
+- **CLI 能用，但 bridge 提示鉴权或数据库不存在** → CLI 与 bridge 使用了不同的 Home
+  （常见于 WSL、service、`sudo` 或自定义 XDG 目录）；明确设置 `CODEX_HOME`、
+  `CLAUDE_CONFIG_DIR` 或 `OPENCODE_DB`。
+- **原生 Windows 下手表连不上 Wi-Fi 模式** → 用管理员 PowerShell 放行 TCP 8080：
+
+  ```powershell
+  netsh advfirewall firewall add rule name="cc-island" dir=in action=allow protocol=TCP localport=8080
+  ```
 - **Codex 显示 `network unreachable` / `network timeout`** → 这是 bridge 到官方接口的
   网络问题，不是 Codex 登录失效。检查运行进程的 DNS 与代理环境；尤其 `sudo` 常会清掉
   `HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY`，应把它们写进 service unit 或使用普通用户启动。
@@ -230,6 +279,7 @@ WSL2 默认 NAT，手表无法直接访问 WSL 里监听的端口，二选一：
 
 ## 致谢与商标
 
+- 维护版 fork 自 [alexjc-tech/cc-island](https://github.com/alexjc-tech/cc-island)（MIT）。
 - 基于 M5Stack 的 [M5StopWatch‑UserDemo](https://github.com/m5stack/M5StopWatch-UserDemo)（MIT）。
 - 灵感来自 Eric Park 的 [CodexIsland](https://github.com/ericjypark/codex-island)。
 - BLE 传统广播包修复基于 [@xiaoyuanzi1230](https://github.com/xiaoyuanzi1230)

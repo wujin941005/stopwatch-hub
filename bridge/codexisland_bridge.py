@@ -8,20 +8,19 @@ over BLE (Nordic UART, the original transport) or served over HTTP for the
 watch to poll over Wi-Fi.
 
 Providers:
-  - Claude  : GET api.anthropic.com/api/oauth/usage (keychain/env OAuth,
-              mirrors ericjypark/codex-island) + today's cost from
-              ~/.claude/projects/**/*.jsonl.
+  - Claude  : GET api.anthropic.com/api/oauth/usage (env, macOS Keychain, or
+              ~/.claude/.credentials.json OAuth) + today's local log cost.
   - Codex   : GET chatgpt.com/backend-api/wham/usage via ~/.codex/auth.json
               + today's cost from ~/.codex/sessions logs.
-  - OpenCode: SQLite read of ~/.local/share/opencode/opencode.db — the
-              message table carries OpenCode's own cost + token counters.
+  - OpenCode: read-only SQLite from its XDG data directory — the message table
+              carries OpenCode's own cost + token counters.
 
 Claude/Codex API-equivalent values use OpenRouter's public model catalog,
 cached locally for offline operation. No credentials, prompts, or usage data
 are sent to OpenRouter.
 
-Optional system stats (CPU / memory / disk / network) come from the Windows
-host through WSL interop, with /proc + statvfs as a fallback. Set
+Optional system stats (CPU / memory / disk / network) support native Windows,
+macOS, and Linux; WSL reads the Windows host through PowerShell. Set
 CC_SYSTEM_MONITOR=true to collect them and include the watch's system page.
 
 Usage:
@@ -32,9 +31,11 @@ Usage:
 """
 
 import argparse
+import glob
 import json
 import math
 import os
+import platform
 import re
 import ssl
 import subprocess
@@ -81,6 +82,117 @@ def _env_bool(name, default=False):
 def system_monitor_enabled():
     """Whether host metrics should be collected and sent to the watch."""
     return _env_bool("CC_SYSTEM_MONITOR", False)
+
+
+# --------------------------------------------------------------------------- #
+# Cross-platform host paths
+# --------------------------------------------------------------------------- #
+_WINDOWS_HOME_PROBED = False
+_WINDOWS_HOME = None
+
+
+def _is_wsl():
+    if not sys.platform.startswith("linux"):
+        return False
+    if os.environ.get("WSL_DISTRO_NAME"):
+        return True
+    try:
+        return "microsoft" in platform.release().lower()
+    except OSError:
+        return False
+
+
+def _powershell_executable():
+    wsl_path = "/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe"
+    return wsl_path if os.path.exists(wsl_path) else "powershell.exe"
+
+
+def _windows_to_wsl_path(value):
+    """Translate C:\\Users\\... paths when the bridge itself runs in WSL."""
+    value = (value or "").strip().strip('"')
+    if not _is_wsl():
+        return value
+    match = re.match(r"^([A-Za-z]):[\\/](.*)$", value)
+    if not match:
+        return value
+    drive, tail = match.groups()
+    tail = tail.replace("\\", "/")
+    return f"/mnt/{drive.lower()}/{tail}"
+
+
+def _expand_host_path(value):
+    value = _windows_to_wsl_path(value)
+    return os.path.normpath(os.path.expanduser(os.path.expandvars(value)))
+
+
+def _windows_home():
+    """Return the mounted Windows profile directory when running under WSL."""
+    global _WINDOWS_HOME_PROBED, _WINDOWS_HOME
+    if _WINDOWS_HOME_PROBED:
+        return _WINDOWS_HOME
+    _WINDOWS_HOME_PROBED = True
+    if not _is_wsl():
+        return None
+    try:
+        out = subprocess.run(
+            [_powershell_executable(), "-NoProfile", "-NonInteractive",
+             "-Command", "[Environment]::GetFolderPath('UserProfile')"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=8,
+        )
+        line = out.stdout.strip().splitlines()[-1] if out.stdout.strip() else ""
+        path = _expand_host_path(line)
+        if line and os.path.isdir(path):
+            _WINDOWS_HOME = path
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    return _WINDOWS_HOME
+
+
+def _host_homes():
+    """Local home plus the Windows profile mounted into WSL, without dupes."""
+    values = [_expand_host_path("~")]
+    windows = _windows_home()
+    if windows:
+        values.append(windows)
+    out = []
+    seen = set()
+    for value in values:
+        key = os.path.normcase(os.path.realpath(value))
+        if key not in seen:
+            seen.add(key)
+            out.append(value)
+    return out
+
+
+def _unique_paths(paths):
+    out = []
+    seen = set()
+    for path in paths:
+        path = _expand_host_path(path)
+        key = os.path.normcase(os.path.realpath(path))
+        if key not in seen:
+            seen.add(key)
+            out.append(path)
+    return out
+
+
+def _codex_roots():
+    roots = []
+    configured = os.environ.get("CODEX_HOME", "").strip()
+    if configured:
+        roots.append(configured)
+    roots.extend(os.path.join(home, ".codex") for home in _host_homes())
+    return _unique_paths(roots)
+
+
+def _claude_roots():
+    roots = []
+    configured = os.environ.get("CLAUDE_CONFIG_DIR", "").strip()
+    if configured:
+        roots.append(configured)
+    roots.extend(os.path.join(home, ".claude") for home in _host_homes())
+    return _unique_paths(roots)
 
 
 # --------------------------------------------------------------------------- #
@@ -131,13 +243,16 @@ def _parse_reset(value):
 # Codex
 # --------------------------------------------------------------------------- #
 def fetch_codex():
-    path = os.path.expanduser("~/.codex/auth.json")
-    try:
-        with open(path) as f:
-            tokens = json.load(f).get("tokens") or {}
-        token = tokens.get("access_token")
-    except (OSError, json.JSONDecodeError):
-        token = None
+    token = None
+    for root in _codex_roots():
+        try:
+            with open(os.path.join(root, "auth.json")) as f:
+                tokens = json.load(f).get("tokens") or {}
+            token = tokens.get("access_token")
+        except (OSError, json.JSONDecodeError):
+            continue
+        if token:
+            break
     if not token:
         return {"error": "no codex auth"}
 
@@ -206,7 +321,7 @@ def _claude_keychain_account():
     return None
 
 
-def _read_claude_creds():
+def _read_claude_keychain_creds():
     account = _claude_keychain_account()
     if not account:
         return None
@@ -223,16 +338,79 @@ def _read_claude_creds():
         return None
     if not oauth.get("accessToken") or not oauth.get("refreshToken"):
         return None
-    return {"account": account, "oauth": oauth}
+    return {"source": "keychain", "account": account, "oauth": oauth}
 
 
-def _write_claude_creds(account, oauth):
+def _write_claude_keychain_creds(account, oauth):
     payload = json.dumps({"claudeAiOauth": oauth})
     out = _security([
         "add-generic-password", "-U",
         "-s", "Claude Code-credentials", "-a", account, "-w", payload,
     ])
     return bool(out and out.returncode == 0)
+
+
+def _read_claude_file_creds():
+    """Claude Code stores OAuth here on Linux/Windows and some headless Macs."""
+    for root in _claude_roots():
+        path = os.path.join(root, ".credentials.json")
+        try:
+            with open(path) as f:
+                outer = json.load(f)
+            oauth = outer.get("claudeAiOauth") or {}
+        except (OSError, json.JSONDecodeError, AttributeError):
+            continue
+        if oauth.get("accessToken") and oauth.get("refreshToken"):
+            return {"source": "file", "path": path, "oauth": oauth}
+    return None
+
+
+def _read_claude_creds():
+    # Claude Code normally uses Keychain on macOS and a credentials file on
+    # Linux/Windows. Accept either so headless and migrated installs also work.
+    if sys.platform == "darwin":
+        return _read_claude_keychain_creds() or _read_claude_file_creds()
+    return _read_claude_file_creds() or _read_claude_keychain_creds()
+
+
+def _write_claude_file_creds(path, oauth):
+    tmp = f"{path}.cc-island-{os.getpid()}.tmp"
+    try:
+        try:
+            with open(path) as f:
+                outer = json.load(f)
+            if not isinstance(outer, dict):
+                outer = {}
+        except (OSError, json.JSONDecodeError):
+            outer = {}
+        outer["claudeAiOauth"] = oauth
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(tmp, "w") as f:
+            json.dump(outer, f, separators=(",", ":"))
+        try:
+            os.chmod(tmp, 0o600)
+        except OSError:
+            pass
+        os.replace(tmp, path)
+        return True
+    except OSError:
+        return False
+    finally:
+        try:
+            os.unlink(tmp)
+        except FileNotFoundError:
+            pass
+        except OSError:
+            # A failed cleanup must not hide the original credential result.
+            pass
+
+
+def _write_claude_creds(creds, oauth):
+    if creds.get("source") == "keychain":
+        return _write_claude_keychain_creds(creds["account"], oauth)
+    if creds.get("source") == "file":
+        return _write_claude_file_creds(creds["path"], oauth)
+    return False
 
 
 def _refresh_claude(refresh_token):
@@ -316,7 +494,7 @@ def fetch_claude():
             oauth["accessToken"] = refreshed["access_token"]
             oauth["refreshToken"] = refreshed["refresh_token"]
             oauth["expiresAt"] = refreshed["expires_at"]
-            _write_claude_creds(creds["account"], oauth)
+            _write_claude_creds(creds, oauth)
             kind, val = _probe_claude(refreshed["access_token"], plan)
             if kind == "ok":
                 return val
@@ -329,7 +507,7 @@ def fetch_claude():
 
 
 # --------------------------------------------------------------------------- #
-# OpenCode — SQLite read of ~/.local/share/opencode/opencode.db
+# OpenCode — read-only SQLite, auto-detected from its cross-platform XDG data
 # --------------------------------------------------------------------------- #
 def _day_start_ms(days_ago=0):
     """Epoch milliseconds for local midnight `days_ago` calendar days back."""
@@ -402,14 +580,51 @@ def _opencode_message_usage(con, today_ms, week_ms):
     }
 
 
+def _opencode_db_candidates(db_path=None):
+    """OpenCode uses XDG data paths on every OS, including native Windows."""
+    configured = db_path or os.environ.get("OPENCODE_DB", "").strip()
+    if configured:
+        return [_expand_host_path(configured)]
+
+    directories = []
+    xdg = os.environ.get("XDG_DATA_HOME", "").strip()
+    if xdg:
+        directories.append(os.path.join(_expand_host_path(xdg), "opencode"))
+    directories.extend(
+        os.path.join(home, ".local", "share", "opencode")
+        for home in _host_homes()
+    )
+
+    candidates = []
+    for directory in _unique_paths(directories):
+        candidates.append(os.path.join(directory, "opencode.db"))
+        # Development/beta channels use opencode-<channel>.db. Prefer the most
+        # recently modified one after the stable database.
+        channel = glob.glob(os.path.join(directory, "opencode-*.db"))
+        channel.sort(
+            key=lambda path: os.path.getmtime(path) if os.path.exists(path) else 0,
+            reverse=True,
+        )
+        candidates.extend(channel)
+    return _unique_paths(candidates)
+
+
+def _find_opencode_db(db_path=None):
+    for candidate in _opencode_db_candidates(db_path):
+        if os.path.isfile(candidate):
+            return candidate
+    return None
+
+
 def fetch_opencode(db_path=None):
     """Return {t, T, s, d} — today cost, today tokens, today sessions, 7d cost."""
-    path = os.path.expanduser(db_path or os.environ.get("OPENCODE_DB", DEFAULT_OPENCODE_DB))
-    if not os.path.exists(path):
+    path = _find_opencode_db(db_path)
+    if not path:
         return {"error": "no opencode db"}
     try:
         import sqlite3
-        con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        from pathlib import Path
+        con = sqlite3.connect(f"{Path(path).resolve().as_uri()}?mode=ro", uri=True)
         try:
             today_ms = _day_start_ms()
             week_ms = _day_start_ms(6)
@@ -436,11 +651,11 @@ def fetch_opencode(db_path=None):
 
 
 # --------------------------------------------------------------------------- #
-# System stats — Windows-host PC via PowerShell (WSL interop), /proc fallback
+# System stats — native Windows, macOS, Linux, plus Windows-host metrics in WSL
 # --------------------------------------------------------------------------- #
-_PC_STATS_CACHE = {}
-_PC_STATS_CACHE_TTL = 5.0
-_PC_NAME = ""  # Windows computer name, fetched once
+_SYS_STATS_CACHE = {}
+_SYS_STATS_LOCK = threading.Lock()
+_HOST_NAME = ""
 _SYS_REFRESH_TTL = 4.0
 _SYS_REFRESHER_STARTED = False
 
@@ -470,18 +685,14 @@ $tx  = (Get-Counter '\Network Interface(*)\Bytes Sent/sec').CounterSamples | Mea
 """
 
 
-def _pc_sys_stats():
-    """Query the Windows host over WSL interop (powered by -EncodedCommand to
-    dodge quoting). Returns a dict or None on any failure."""
+def _windows_sys_stats():
+    """Query native Windows or the Windows host from WSL via PowerShell."""
     import base64
-    # WSL interop doesn't put powershell.exe on PATH; use the full path.
-    ps = ("/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe"
-          if os.path.exists("/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe")
-          else "powershell.exe")
     try:
         encoded = base64.b64encode(_POWERSHELL_STATS_SCRIPT.encode("utf-16-le")).decode()
         out = subprocess.run(
-            [ps, "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded],
+            [_powershell_executable(), "-NoProfile", "-NonInteractive",
+             "-EncodedCommand", encoded],
             capture_output=True, text=True, encoding="utf-8", errors="replace",
             timeout=15,
         )
@@ -497,7 +708,7 @@ def _pc_sys_stats():
 
 
 # --------------------------------------------------------------------------- #
-# System stats — pure /proc reads (CPU / memory / disk / network)
+# Linux /proc fallback
 # --------------------------------------------------------------------------- #
 def _read_proc_lines(path):
     with open(path) as f:
@@ -544,7 +755,7 @@ def _disk_pct(mount="/"):
         if total <= 0:
             return None
         return round(100.0 * (total - avail) / total, 1)
-    except OSError:
+    except (OSError, AttributeError):
         return None
 
 
@@ -574,20 +785,205 @@ def _net_rate_kbps(sample_s=0.5):
         return None, None
 
 
+def _proc_sys_stats():
+    up, dn = _net_rate_kbps()
+    return {
+        "name": platform.node(),
+        "cpu": _cpu_pct(),
+        "mem": _mem_pct(),
+        "disk": _disk_pct(),
+        "dr": None,
+        "dw": None,
+        "nup": up,
+        "ndn": dn,
+    }
+
+
+def _psutil_sys_stats():
+    """Full cross-platform metrics when psutil is installed."""
+    try:
+        import psutil
+    except ImportError:
+        return None
+    try:
+        mount = (os.environ.get("SystemDrive", "C:") + "\\"
+                 if os.name == "nt" else "/")
+        cpu = round(float(psutil.cpu_percent(interval=0.2)), 1)
+        mem = round(float(psutil.virtual_memory().percent), 1)
+        disk = round(float(psutil.disk_usage(mount).percent), 1)
+        disk0 = psutil.disk_io_counters()
+        net0 = psutil.net_io_counters()
+        sample_s = 0.3
+        time.sleep(sample_s)
+        disk1 = psutil.disk_io_counters()
+        net1 = psutil.net_io_counters()
+        dr = ((disk1.read_bytes - disk0.read_bytes) / 1024 / sample_s
+              if disk0 and disk1 else None)
+        dw = ((disk1.write_bytes - disk0.write_bytes) / 1024 / sample_s
+              if disk0 and disk1 else None)
+        up = ((net1.bytes_sent - net0.bytes_sent) / 1024 / sample_s
+              if net0 and net1 else None)
+        dn = ((net1.bytes_recv - net0.bytes_recv) / 1024 / sample_s
+              if net0 and net1 else None)
+        return {
+            "name": platform.node(),
+            "cpu": cpu,
+            "mem": mem,
+            "disk": disk,
+            "dr": None if dr is None else round(max(0, dr), 1),
+            "dw": None if dw is None else round(max(0, dw), 1),
+            "nup": None if up is None else round(max(0, up), 1),
+            "ndn": None if dn is None else round(max(0, dn), 1),
+        }
+    except (OSError, ValueError, AttributeError):
+        return None
+
+
+def _macos_cpu_pct():
+    try:
+        out = subprocess.run(
+            ["ps", "-A", "-o", "%cpu="], capture_output=True, text=True,
+            timeout=5,
+        )
+        total = sum(float(value) for value in out.stdout.split())
+        return round(min(100.0, total / max(1, os.cpu_count() or 1)), 1)
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        return None
+
+
+def _parse_vm_stat(text, total_bytes):
+    """Convert macOS vm_stat output to a practical used-memory percentage."""
+    match = re.search(r"page size of (\d+) bytes", text)
+    if not match or total_bytes <= 0:
+        return None
+    page_size = int(match.group(1))
+    pages = {}
+    for line in text.splitlines()[1:]:
+        key, sep, raw = line.partition(":")
+        if not sep:
+            continue
+        try:
+            pages[key.strip()] = int(raw.strip().rstrip("."))
+        except ValueError:
+            continue
+    available = sum(
+        pages.get(key, 0)
+        for key in ("Pages free", "Pages inactive", "Pages speculative")
+    ) * page_size
+    return round(max(0.0, min(100.0, 100 * (1 - available / total_bytes))), 1)
+
+
+def _macos_mem_pct():
+    try:
+        total = subprocess.run(
+            ["sysctl", "-n", "hw.memsize"], capture_output=True, text=True,
+            timeout=5, check=True,
+        )
+        vm = subprocess.run(
+            ["vm_stat"], capture_output=True, text=True, timeout=5, check=True,
+        )
+        return _parse_vm_stat(vm.stdout, int(total.stdout.strip()))
+    except (OSError, subprocess.TimeoutExpired, subprocess.CalledProcessError,
+            ValueError):
+        return None
+
+
+def _macos_net_bytes():
+    """Read interface counters without double-counting address-family rows."""
+    try:
+        out = subprocess.run(
+            ["netstat", "-ibn"], capture_output=True, text=True, timeout=5,
+            check=True,
+        )
+        header = None
+        interfaces = {}
+        for line in out.stdout.splitlines():
+            fields = line.split()
+            if not fields:
+                continue
+            if fields[0] == "Name" and "Ibytes" in fields and "Obytes" in fields:
+                header = fields
+                continue
+            if (not header or fields[0].startswith("lo")
+                    or len(fields) < len(header)):
+                continue
+            try:
+                rx = int(fields[header.index("Ibytes")])
+                tx = int(fields[header.index("Obytes")])
+            except (ValueError, IndexError):
+                continue
+            old = interfaces.get(fields[0], (0, 0))
+            interfaces[fields[0]] = max(old[0], rx), max(old[1], tx)
+        return (
+            sum(value[0] for value in interfaces.values()),
+            sum(value[1] for value in interfaces.values()),
+        )
+    except (OSError, subprocess.TimeoutExpired, subprocess.CalledProcessError):
+        return None
+
+
+def _macos_sys_stats():
+    full = _psutil_sys_stats()
+    if full:
+        return full
+    first = _macos_net_bytes()
+    time.sleep(0.5)
+    second = _macos_net_bytes()
+    up = dn = None
+    if first and second:
+        dn = round(max(0, second[0] - first[0]) / 1024 / 0.5, 1)
+        up = round(max(0, second[1] - first[1]) / 1024 / 0.5, 1)
+    return {
+        "name": platform.node(),
+        "cpu": _macos_cpu_pct(),
+        "mem": _macos_mem_pct(),
+        "disk": _disk_pct(),
+        "dr": None,
+        "dw": None,
+        "nup": up,
+        "ndn": dn,
+    }
+
+
+def _collect_system_stats():
+    if os.name == "nt":
+        # Native Windows is cheaper and more locale-independent through
+        # psutil. PowerShell remains a dependency-free fallback. WSL keeps
+        # PowerShell first because psutil there would describe only the VM.
+        return _psutil_sys_stats() or _windows_sys_stats()
+    if _is_wsl():
+        stats = _windows_sys_stats()
+        if stats:
+            return stats
+        return _psutil_sys_stats() or _proc_sys_stats()
+    if sys.platform == "darwin":
+        return _macos_sys_stats()
+    if sys.platform.startswith("linux"):
+        return _psutil_sys_stats() or _proc_sys_stats()
+    return _psutil_sys_stats()
+
+
+def _refresh_system_cache():
+    global _HOST_NAME
+    stats = _collect_system_stats()
+    if not stats:
+        return False
+    name = stats.pop("name", None)
+    with _SYS_STATS_LOCK:
+        _SYS_STATS_CACHE.clear()
+        _SYS_STATS_CACHE.update(stats)
+        _SYS_STATS_CACHE["_at"] = time.time()
+        if name:
+            _HOST_NAME = str(name).strip()
+    return True
+
+
 def _sys_refresher():
-    """Background loop that keeps the PC stats cache warm, so /stats never has
-    to wait on the slow PowerShell query."""
-    global _PC_STATS_CACHE
+    """Keep platform metrics warm so /stats never runs a blocking sampler."""
     while True:
         time.sleep(_SYS_REFRESH_TTL)
         try:
-            s = _pc_sys_stats()
-            if s:
-                name = s.pop("name", None)
-                _PC_STATS_CACHE.update(s)
-                _PC_STATS_CACHE["_at"] = time.time()
-                if name:
-                    globals()["_PC_NAME"] = name
+            _refresh_system_cache()
         except Exception:  # noqa: BLE001
             pass
 
@@ -601,31 +997,22 @@ def _ensure_sys_refresher():
 
 
 def sys_stats():
-    """Windows-host PC stats from the warm cache (refreshed in the background);
-    falls back to /proc (the WSL VM) if PowerShell isn't reachable. `name` is
-    the Windows computer name, fetched once and cached forever."""
+    """Return warm native host metrics on Windows, macOS, Linux, or WSL."""
     _ensure_sys_refresher()
-    cache = _PC_STATS_CACHE
-    if not cache:
-        # Cold start: one synchronous fetch so the first read isn't empty.
+    if not _SYS_STATS_CACHE:
         try:
-            s = _pc_sys_stats()
-            if s:
-                name = s.pop("name", None)
-                cache.update(s)
-                cache["_at"] = time.time()
-                if name:
-                    globals()["_PC_NAME"] = name
+            _refresh_system_cache()
         except Exception:  # noqa: BLE001
             pass
-    if not cache:
-        # PowerShell unavailable — fall back to /proc (the WSL VM itself).
-        up, dn = _net_rate_kbps()
-        return {"cpu": _cpu_pct(), "mem": _mem_pct(), "disk": _disk_pct(),
-                "nup": up, "ndn": dn}
-    out = {k: cache[k] for k in ("cpu", "mem", "disk", "dr", "dw", "nup", "ndn")}
-    if _PC_NAME:
-        out["name"] = _PC_NAME
+    with _SYS_STATS_LOCK:
+        out = {
+            key: _SYS_STATS_CACHE.get(key)
+            for key in ("cpu", "mem", "disk", "dr", "dw", "nup", "ndn")
+        }
+    if _HOST_NAME:
+        out["name"] = _HOST_NAME
+    elif platform.node():
+        out["name"] = platform.node()
     return out
 
 
@@ -931,11 +1318,25 @@ def _parse_ts(s):
         return 0.0
 
 
+def _glob_unique(patterns):
+    paths = []
+    seen = set()
+    for pattern in patterns:
+        for path in glob.glob(pattern, recursive=True):
+            key = os.path.normcase(os.path.realpath(path))
+            if key not in seen:
+                seen.add(key)
+                paths.append(path)
+    return paths
+
+
 def cost_claude(midnight):
-    import glob
     cost, tokens, seen = 0.0, 0, set()
-    pat = os.path.expanduser("~/.claude/projects/**/*.jsonl")
-    for path in glob.glob(pat, recursive=True):
+    paths = _glob_unique(
+        os.path.join(root, "projects", "**", "*.jsonl")
+        for root in _claude_roots()
+    )
+    for path in paths:
         try:
             if os.path.getmtime(path) < midnight - 86400:
                 continue
@@ -974,14 +1375,16 @@ def cost_claude(midnight):
 
 
 def cost_codex(midnight):
-    import glob
     cost, tokens = 0.0, 0
     snapshot_fields = (
         "input_tokens", "cached_input_tokens", "cache_write_input_tokens",
         "output_tokens", "reasoning_output_tokens", "total_tokens",
     )
-    pat = os.path.expanduser("~/.codex/sessions/**/rollout-*.jsonl")
-    for path in glob.glob(pat, recursive=True):
+    paths = _glob_unique(
+        os.path.join(root, "sessions", "**", "rollout-*.jsonl")
+        for root in _codex_roots()
+    )
+    for path in paths:
         try:
             if os.path.getmtime(path) < midnight - 86400:
                 continue
@@ -1567,7 +1970,8 @@ def main():
     parser.add_argument("--ble", nargs="?", const=5, type=float, metavar="MINS",
                         help="BLE push every N minutes (needs bleak)")
     parser.add_argument("--db", metavar="PATH", default=None,
-                        help="opencode SQLite db path (default ~/.local/share/opencode/opencode.db)")
+                        help=("OpenCode SQLite path (auto-detected; stable "
+                              f"default {DEFAULT_OPENCODE_DB})"))
     parser.add_argument("--go-workspace", metavar="WRK_ID", default=None,
                         help="OpenCode Go workspace id (or OPENCODE_GO_WORKSPACE_ID)")
     parser.add_argument("--go-cookie", metavar="AUTH_COOKIE", default=None,

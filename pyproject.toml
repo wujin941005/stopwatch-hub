@@ -1,0 +1,15 @@
+[project]
+name = "cc-island-bridge"
+version = "0.1.0"
+description = "Cross-platform AI coding usage and host-health bridge for CC Island"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+dependencies = [
+    "bleak>=0.22",
+    "certifi>=2024.2.2",
+    "psutil>=5.9",
+]
+
+[tool.uv]
+package = false
