@@ -260,7 +260,8 @@ transport.
 - **Auto‑refresh (BLE)**: every N minutes (default 5; Anthropic rate‑limits the
   usage endpoint, so don't go below a few minutes).
 - **Page switch**: swipe left/right, or use automatic rotation (source
-  fallback: 5 s). The **orange button** toggles `AUTO` / `MAN`;
+  fallback: 5 s). The **orange button** toggles `AUTO` (timer-based cycling) /
+  `MAN` (stay on the current page until you swipe);
   `.env.example` sets `CC_AUTO_SWITCH_MS=0`, so generated firmware starts in
   manual mode unless you change it.
 - **Manual refresh**: press the **blue button** — the watch buzzes and asks
@@ -353,6 +354,15 @@ transport.
 The original provider auth and local-log recipes were adapted from
 [CodexIsland](https://github.com/ericjypark/codex-island); the firmware UI,
 OpenCode, Wi-Fi polling, system monitoring, and navigation live in this project.
+
+## Contributing
+
+Pull requests are welcome, especially for additional coding providers and
+platform integrations. A new provider should keep credentials on the host and,
+where applicable, include its bridge collector, compact watch payload,
+firmware row/page, configuration, tests, and English/Chinese documentation.
+Please also distinguish real subscription quotas from locally calculated token
+or API-equivalent cost estimates.
 
 ## Troubleshooting
 
