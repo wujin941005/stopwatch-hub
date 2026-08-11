@@ -1,5 +1,9 @@
 # CC Island
 
+<p align="center">
+  English | <a href="README.zh-CN.md">简体中文</a>
+</p>
+
 > AI coding usage and host health, living on your wrist.
 >
 > 把 AI 编程用量和主机状态，搬到你的手表上。
@@ -97,9 +101,10 @@ and add the System page. In either layout the watch can show:
   with resets); otherwise local today/7-day usage is shown
 
 Amounts shown as `~$` are **API-equivalent values**, not an actual bill.
-Claude/Codex logs are valued with the current public OpenRouter price catalog;
-OpenCode uses the per-message cost it records itself. Users on a Coding Plan,
-OpenCode Go, or another subscription are not charged this amount per token.
+Claude, Codex, and recognized OpenCode models are valued with the current public
+OpenRouter price catalog. OpenCode's recorded amount remains a fallback for an
+unknown model. Users on a Coding Plan, OpenCode Go, or another subscription are
+not charged this amount per token.
 
 The optional **System** page shows the bridge host's name, CPU %, memory %,
 disk usage and read/write rate, plus network upload/download. Under WSL the
@@ -305,7 +310,8 @@ transport.
   hours and keeps a last-good disk cache plus a small embedded offline fallback.
   Set `CC_PRICING_REFRESH_HOURS` or `CC_PRICING_CACHE` to override those defaults;
   `CC_CODEX_FALLBACK_MODEL` controls how the hidden `codex-auto-review` model is
-  valued (default `gpt-5.6-sol`).
+  valued (default `gpt-5.6-sol`). OpenCode router/subscription provider IDs are
+  matched to an unambiguous public model ID when their publisher name differs.
 
 ## How it works (data sources)
 
@@ -321,12 +327,13 @@ transport.
 - **OpenCode**: read-only SQLite query of its official XDG data directory,
   normally `~/.local/share/opencode/opencode.db` on all three platforms.
   Stable, beta, and development database names are auto-detected. Today's and
-  7-day values sum each
-  assistant message's own `cost` and token counters by message time, so a
-  session continued across midnight remains accurate. Override the path with
-  `OPENCODE_DB` or `--db`; older schemas fall back to session aggregates. This
-  recorded cost is used directly rather than repricing OpenCode tokens through
-  the OpenRouter catalog.
+  7-day values use each assistant message's timestamp and token counters, so a
+  session continued across midnight remains accurate. Duplicate subagent call
+  fingerprints are counted once. Known models are repriced through OpenRouter
+  to show API-equivalent value even when a Coding Plan records zero cost;
+  unknown models and older schemas fall back to OpenCode's recorded amount.
+  `/json` retains that amount as `actual_t` / `actual_d` for diagnostics.
+  Override the path with `OPENCODE_DB` or `--db`.
 - **OpenCode Go quota** (optional): set `OPENCODE_GO_WORKSPACE_ID` and
   `OPENCODE_GO_AUTH_COOKIE` (or `--go-workspace` / `--go-cookie`) to also show
   the real subscription windows. OpenCode has no public usage API, so this
@@ -340,16 +347,19 @@ transport.
   network rates, while Windows PowerShell, macOS native commands, and Linux
   `/proc` remain fallbacks. When false, the bridge neither samples these metrics
   nor includes `sys`.
-- **Cost**: parses `~/.claude/projects/**/*.jsonl` and
-  `~/.codex/sessions/**/rollout-*.jsonl` for token usage and prices each turn
-  from OpenRouter's frequently updated public catalog. Only that public catalog
-  is downloaded; local credentials, prompts, and usage never leave the host.
+- **Cost**: parses `~/.claude/projects/**/*.jsonl`,
+  `~/.codex/sessions/**/rollout-*.jsonl`, and OpenCode's local database for
+  token usage, then prices recognized models from OpenRouter's frequently
+  updated public catalog. Only that public catalog is downloaded; local
+  credentials, prompts, and usage never leave the host.
   The displayed `~$` is an API-equivalent value, not the user's Coding Plan or
   subscription charge. Exact model IDs are preferred, then dated/provider
   aliases and the offline fallback. Unknown models still add to the token total
-  and are reported under `/json` pricing diagnostics. The token total counts
-  non-cached input, cached input, cache writes, and output once each; Codex
-  reasoning tokens are already part of output and are not added again.
+  and are reported under `/json` pricing diagnostics; OpenCode can retain its
+  recorded amount as a fallback. The token total counts non-cached input,
+  cached input, cache writes, and output once each. Codex reasoning is already
+  part of output; OpenCode's separately reported reasoning is added once at the
+  output rate.
 
 The original provider auth and local-log recipes were adapted from
 [CodexIsland](https://github.com/ericjypark/codex-island); the firmware UI,

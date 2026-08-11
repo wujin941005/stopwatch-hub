@@ -12,12 +12,12 @@ Providers:
               ~/.claude/.credentials.json OAuth) + today's local log cost.
   - Codex   : GET chatgpt.com/backend-api/wham/usage via ~/.codex/auth.json
               + today's cost from ~/.codex/sessions logs.
-  - OpenCode: read-only SQLite from its XDG data directory — the message table
-              carries OpenCode's own cost + token counters.
+  - OpenCode: read-only SQLite from its XDG data directory — message token
+              counters are repriced to the same API-equivalent basis.
 
-Claude/Codex API-equivalent values use OpenRouter's public model catalog,
-cached locally for offline operation. No credentials, prompts, or usage data
-are sent to OpenRouter.
+API-equivalent values use OpenRouter's public model catalog, cached locally for
+offline operation. No credentials, prompts, or usage data are sent to
+OpenRouter.
 
 Optional system stats (CPU / memory / disk / network) support native Windows,
 macOS, and Linux; WSL reads the Windows host through PowerShell. Set
@@ -535,27 +535,33 @@ def _opencode_query(con, since_ms):
 
 
 def _opencode_message_usage(con, today_ms, week_ms):
-    """Aggregate OpenCode's own per-message cost/token counters.
+    """Aggregate and reprice OpenCode assistant messages.
 
     Session rows are lifetime aggregates, so filtering them by session creation
     time misses usage when an older session is continued today. Assistant
-    messages carry the same counters with their actual event time. CROSS JOIN
-    keeps `session` as the outer loop so OpenCode's `(session_id, time_created)`
-    message index can serve the bounded lookup instead of scanning the large
-    message table.
+    messages carry token counters with their actual event time. OpenCode plan
+    rows may record zero cost, so known models use OpenRouter's public prices;
+    the recorded amount remains the fallback for an unrecognized model.
+
+    Forked subagent sessions can record one upstream call under multiple message
+    IDs. The `dedup` CTE mirrors tokscale/CodexIsland's timestamp + model + token
+    fingerprint before aggregation. CROSS JOIN keeps `session` as the outer loop
+    so OpenCode's `(session_id, time_created)` index serves the bounded lookup.
     """
-    row = con.execute(
+    rows = con.execute(
         """
         WITH assistant AS (
-            SELECT m.session_id,
+            SELECT m.id,
+                   m.session_id,
                    m.time_created,
+                   COALESCE(json_extract(m.data, '$.providerID'), '') AS provider,
+                   COALESCE(json_extract(m.data, '$.modelID'), '') AS model,
                    COALESCE(CAST(json_extract(m.data, '$.cost') AS REAL), 0) AS cost,
-                   COALESCE(CAST(json_extract(m.data, '$.tokens.input') AS INTEGER), 0)
-                     + COALESCE(CAST(json_extract(m.data, '$.tokens.output') AS INTEGER), 0)
-                     + COALESCE(CAST(json_extract(m.data, '$.tokens.reasoning') AS INTEGER), 0)
-                     + COALESCE(CAST(json_extract(m.data, '$.tokens.cache.read') AS INTEGER), 0)
-                     + COALESCE(CAST(json_extract(m.data, '$.tokens.cache.write') AS INTEGER), 0)
-                     AS tokens
+                   COALESCE(CAST(json_extract(m.data, '$.tokens.input') AS INTEGER), 0) AS input,
+                   COALESCE(CAST(json_extract(m.data, '$.tokens.output') AS INTEGER), 0) AS output,
+                   COALESCE(CAST(json_extract(m.data, '$.tokens.reasoning') AS INTEGER), 0) AS reasoning,
+                   COALESCE(CAST(json_extract(m.data, '$.tokens.cache.read') AS INTEGER), 0) AS cache_read,
+                   COALESCE(CAST(json_extract(m.data, '$.tokens.cache.write') AS INTEGER), 0) AS cache_write
             FROM session AS s
             CROSS JOIN message AS m
             WHERE s.time_updated >= :week
@@ -563,20 +569,76 @@ def _opencode_message_usage(con, today_ms, week_ms):
               AND m.time_created >= :week
               AND CASE WHEN json_valid(m.data)
                        THEN json_extract(m.data, '$.role') END = 'assistant'
+        ), dedup AS (
+            SELECT MIN(session_id) AS session_id,
+                   time_created, provider, model,
+                   input, output, reasoning, cache_read, cache_write,
+                   MAX(cost) AS cost
+            FROM assistant
+            GROUP BY time_created, provider, model,
+                     input, output, reasoning, cache_read, cache_write
         )
-        SELECT COUNT(DISTINCT CASE WHEN time_created >= :today THEN session_id END),
+        SELECT (SELECT COUNT(DISTINCT session_id)
+                FROM assistant WHERE time_created >= :today) AS sessions,
+               provider,
+               model,
                COALESCE(SUM(CASE WHEN time_created >= :today THEN cost ELSE 0 END), 0),
-               COALESCE(SUM(CASE WHEN time_created >= :today THEN tokens ELSE 0 END), 0),
-               COALESCE(SUM(cost), 0)
-        FROM assistant
+               COALESCE(SUM(CASE WHEN time_created >= :today THEN input ELSE 0 END), 0),
+               COALESCE(SUM(CASE WHEN time_created >= :today THEN output ELSE 0 END), 0),
+               COALESCE(SUM(CASE WHEN time_created >= :today THEN reasoning ELSE 0 END), 0),
+               COALESCE(SUM(CASE WHEN time_created >= :today THEN cache_read ELSE 0 END), 0),
+               COALESCE(SUM(CASE WHEN time_created >= :today THEN cache_write ELSE 0 END), 0),
+               COALESCE(SUM(cost), 0),
+               COALESCE(SUM(input), 0),
+               COALESCE(SUM(output), 0),
+               COALESCE(SUM(reasoning), 0),
+               COALESCE(SUM(cache_read), 0),
+               COALESCE(SUM(cache_write), 0)
+        FROM dedup
+        GROUP BY provider, model
         """,
         {"today": today_ms, "week": week_ms},
-    ).fetchone()
+    ).fetchall()
+
+    sessions = 0
+    today_cost = week_cost = 0.0
+    today_tokens = 0
+    actual_today = actual_week = 0.0
+    cost_sources = set()
+    for row in rows:
+        sessions = max(sessions, int(row[0] or 0))
+        provider, model = str(row[1] or ""), str(row[2] or "")
+        actual_today += float(row[3] or 0)
+        today = tuple(int(value or 0) for value in row[4:9])
+        actual_week += float(row[9] or 0)
+        week = tuple(int(value or 0) for value in row[10:15])
+        today_tokens += sum(today)
+
+        rates = _price_rates(provider, model)
+        if rates is None:
+            today_cost += float(row[3] or 0)
+            week_cost += float(row[9] or 0)
+            cost_sources.add("recorded")
+            continue
+
+        # OpenCode exposes reasoning separately; like the original CodexIsland
+        # reader, bill it at the output rate and include it once in TOKENS.
+        today_cost += _cost_with_rates(
+            rates, today[0], today[1] + today[2], today[4], today[3]
+        )
+        week_cost += _cost_with_rates(
+            rates, week[0], week[1] + week[2], week[4], week[3]
+        )
+        cost_sources.add("openrouter")
+
     return {
-        "sessions": int(row[0] or 0),
-        "cost": float(row[1] or 0),
-        "tokens": int(row[2] or 0),
-        "week_cost": float(row[3] or 0),
+        "sessions": sessions,
+        "cost": today_cost,
+        "tokens": today_tokens,
+        "week_cost": week_cost,
+        "actual_cost": actual_today,
+        "week_actual_cost": actual_week,
+        "cost_source": "+".join(sorted(cost_sources)) if cost_sources else "none",
     }
 
 
@@ -635,7 +697,13 @@ def fetch_opencode(db_path=None):
                 # Older OpenCode schemas only expose lifetime session totals.
                 today = _opencode_query(con, today_ms)
                 week = _opencode_query(con, week_ms)
-                usage = {**today, "week_cost": week["cost"]}
+                usage = {
+                    **today,
+                    "week_cost": week["cost"],
+                    "actual_cost": today["cost"],
+                    "week_actual_cost": week["cost"],
+                    "cost_source": "recorded",
+                }
                 source = "sessions"
         finally:
             con.close()
@@ -646,6 +714,9 @@ def fetch_opencode(db_path=None):
         "T": int(usage["tokens"]),
         "s": int(usage["sessions"]),
         "d": round(usage["week_cost"], 2),
+        "actual_t": round(usage["actual_cost"], 2),
+        "actual_d": round(usage["week_actual_cost"], 2),
+        "cost_source": usage["cost_source"],
         "source": source,
     }
 
@@ -1044,6 +1115,8 @@ _FALLBACK_PRICING = {
     "openai/gpt-5.2": (1.75, 14, 1.75, 0.175),
     "openai/gpt-5.4-mini": (0.75, 4.5, 0.75, 0.075),
     "openai/gpt-5-codex": (1.25, 10, 1.25, 0.125),
+    "deepseek/deepseek-v4-flash": (0.14, 0.28, 0.14, 0.028),
+    "moonshotai/kimi-k3": (3, 15, 3, 0.30),
 }
 
 _PRICE_LOCK = threading.Lock()
@@ -1083,7 +1156,7 @@ def _price_refresh_seconds():
 
 
 def _parse_openrouter_pricing(obj):
-    """Return OpenAI/Anthropic rates per million tokens from /api/v1/models."""
+    """Return model rates per million tokens from OpenRouter /api/v1/models."""
     if not isinstance(obj, dict) or not isinstance(obj.get("data"), list):
         return {}
 
@@ -1099,8 +1172,7 @@ def _parse_openrouter_pricing(obj):
         if not isinstance(model, dict):
             continue
         model_id = model.get("id")
-        if (not isinstance(model_id, str)
-                or not model_id.startswith(("openai/", "anthropic/"))):
+        if not isinstance(model_id, str) or "/" not in model_id:
             continue
         pricing = model.get("pricing") or {}
         prompt = per_token(pricing.get("prompt"))
@@ -1249,12 +1321,44 @@ def _model_price_candidates(provider, raw):
     return candidates
 
 
+def _catalog_rate(table, candidates):
+    """Resolve exact ids first, then one unambiguous model-name alias.
+
+    OpenCode provider IDs often describe the subscription/router (for example
+    ``opencode-go`` or ``tu-zi``), not the model publisher used by OpenRouter.
+    A unique catalog suffix lets those installations resolve without a growing
+    hard-coded provider map. ``coding-`` is an OpenCode channel prefix rather
+    than part of the public model id.
+    """
+    for candidate in candidates:
+        if candidate in table:
+            return candidate, table[candidate]
+
+    names = []
+    for candidate in candidates:
+        model = candidate.split("/", 1)[-1]
+        for alias in (model, _strip_model_date(model)):
+            if alias and alias not in names:
+                names.append(alias)
+            if alias.startswith("coding-"):
+                plain = alias[len("coding-"):]
+                if plain and plain not in names:
+                    names.append(plain)
+
+    for name in names:
+        matches = [key for key in table if key.split("/", 1)[-1] == name]
+        if len(matches) == 1:
+            key = matches[0]
+            return key, table[key]
+    return None, None
+
+
 def _price_rates(provider, model):
     candidates = _model_price_candidates(provider, model)
     catalog = _ensure_price_catalog()
-    for candidate in candidates:
-        if candidate in catalog:
-            return catalog[candidate]
+    _, rates = _catalog_rate(catalog, candidates)
+    if rates is not None:
+        return rates
 
     # A newly released model should not wait for the normal six-hour refresh.
     key = candidates[0] if candidates else f"{provider}/{model}"
@@ -1262,14 +1366,14 @@ def _price_rates(provider, model):
     if catalog and now - _PRICE_UNKNOWN_ATTEMPTS.get(key, 0) >= _PRICE_UNKNOWN_REFRESH_S:
         _PRICE_UNKNOWN_ATTEMPTS[key] = now
         catalog = _ensure_price_catalog(force=True)
-        for candidate in candidates:
-            if candidate in catalog:
-                return catalog[candidate]
+        _, rates = _catalog_rate(catalog, candidates)
+        if rates is not None:
+            return rates
 
-    for candidate in candidates:
-        if candidate in _FALLBACK_PRICING:
-            _PRICE_FALLBACK_MODELS.add(candidate)
-            return _FALLBACK_PRICING[candidate]
+    fallback_key, rates = _catalog_rate(_FALLBACK_PRICING, candidates)
+    if rates is not None:
+        _PRICE_FALLBACK_MODELS.add(fallback_key)
+        return rates
     if key not in _PRICE_UNPRICED_MODELS:
         _PRICE_UNPRICED_MODELS.add(key)
         print(f"WARN: no OpenRouter price for {key}; dollar estimate excludes it",
@@ -1277,12 +1381,16 @@ def _price_rates(provider, model):
     return None
 
 
-def _cost(provider, model, in_, out, cache_write, cache_read):
-    rates = _price_rates(provider, model)
-    if not rates:
-        return 0.0
+def _cost_with_rates(rates, in_, out, cache_write, cache_read):
     return (in_ * rates[0] + out * rates[1]
             + cache_write * rates[2] + cache_read * rates[3]) / 1_000_000
+
+
+def _cost(provider, model, in_, out, cache_write, cache_read):
+    rates = _price_rates(provider, model)
+    if rates is None:
+        return 0.0
+    return _cost_with_rates(rates, in_, out, cache_write, cache_read)
 
 
 def pricing_status():

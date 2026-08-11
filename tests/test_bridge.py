@@ -124,7 +124,11 @@ class PricingTests(unittest.TestCase):
                     "pricing": {"prompt": "-1", "completion": "-1"},
                 },
                 {
-                    "id": "other/ignored",
+                    "id": "deepseek/free-example",
+                    "pricing": {"prompt": "0", "completion": "0"},
+                },
+                {
+                    "id": "invalid-without-owner",
                     "pricing": {"prompt": "0", "completion": "0"},
                 },
             ],
@@ -137,7 +141,8 @@ class PricingTests(unittest.TestCase):
         for actual, expected in zip(catalog["anthropic/example"], expected_anthropic):
             self.assertAlmostEqual(actual, expected)
         self.assertNotIn("openai/not-priced", catalog)
-        self.assertNotIn("other/ignored", catalog)
+        self.assertEqual(catalog["deepseek/free-example"], (0.0, 0.0, 0.0, 0.0))
+        self.assertNotIn("invalid-without-owner", catalog)
 
     def test_model_candidates_cover_provider_spelling_dates_and_auto_review(self):
         self.assertEqual(
@@ -157,6 +162,25 @@ class PricingTests(unittest.TestCase):
             "openai/gpt-5.6-sol",
             bridge._model_price_candidates("openai", "codex-auto-review"),
         )
+
+    def test_catalog_aliases_cover_opencode_subscription_provider_ids(self):
+        catalog = {
+            "deepseek/deepseek-v4-flash": (0.14, 0.28, 0.14, 0.028),
+            "moonshotai/kimi-k3": (3.0, 15.0, 3.0, 0.3),
+        }
+        key, rates = bridge._catalog_rate(
+            catalog,
+            bridge._model_price_candidates("opencode-go", "deepseek-v4-flash"),
+        )
+        self.assertEqual(key, "deepseek/deepseek-v4-flash")
+        self.assertEqual(rates, catalog[key])
+
+        key, rates = bridge._catalog_rate(
+            catalog,
+            bridge._model_price_candidates("tu-zi", "coding-kimi-k3"),
+        )
+        self.assertEqual(key, "moonshotai/kimi-k3")
+        self.assertEqual(rates, catalog[key])
 
     def test_cost_uses_dynamic_catalog(self):
         previous = (
@@ -215,7 +239,7 @@ class PricingTests(unittest.TestCase):
 
 
 class OpenCodeTests(unittest.TestCase):
-    def test_message_usage_counts_events_not_session_creation(self):
+    def test_message_usage_reprices_plan_tokens_and_deduplicates_calls(self):
         con = sqlite3.connect(":memory:")
         con.executescript(
             """
@@ -238,11 +262,13 @@ class OpenCodeTests(unittest.TestCase):
             data = {
                 "role": role,
                 "cost": cost,
+                "providerID": "openai",
+                "modelID": "example",
                 "tokens": {
-                    "input": 1,
-                    "output": 2,
-                    "reasoning": 3,
-                    "cache": {"read": 4, "write": 5},
+                    "input": 1_000_000,
+                    "output": 2_000_000,
+                    "reasoning": 3_000_000,
+                    "cache": {"read": 4_000_000, "write": 5_000_000},
                 },
             }
             con.execute("INSERT INTO message VALUES (?, ?, ?, ?)",
@@ -250,15 +276,30 @@ class OpenCodeTests(unittest.TestCase):
 
         add("week", week + 1, "assistant", 2.0)
         add("today", today + 1, "assistant", 1.25)
+        # Same upstream call recorded under another message id: count once.
+        add("today-duplicate", today + 1, "assistant", 1.25)
         add("user", today + 2, "user", 99.0)
         con.execute("INSERT INTO message VALUES (?, ?, ?, ?)",
                     ("invalid", "old-session", today + 3, "not-json"))
 
-        usage = bridge._opencode_message_usage(con, today, week)
+        rates = (1.0, 6.0, 1.25, 0.1)
+        with mock.patch.object(bridge, "_price_rates", return_value=rates):
+            usage = bridge._opencode_message_usage(con, today, week)
         self.assertEqual(usage["sessions"], 1)
-        self.assertEqual(usage["tokens"], 15)
-        self.assertAlmostEqual(usage["cost"], 1.25)
-        self.assertAlmostEqual(usage["week_cost"], 3.25)
+        self.assertEqual(usage["tokens"], 15_000_000)
+        self.assertAlmostEqual(usage["cost"], 37.65)
+        self.assertAlmostEqual(usage["week_cost"], 75.30)
+        self.assertAlmostEqual(usage["actual_cost"], 1.25)
+        self.assertAlmostEqual(usage["week_actual_cost"], 3.25)
+        self.assertEqual(usage["cost_source"], "openrouter")
+
+        # Unknown models retain OpenCode's recorded amount instead of
+        # disappearing from the dollar total.
+        with mock.patch.object(bridge, "_price_rates", return_value=None):
+            fallback = bridge._opencode_message_usage(con, today, week)
+        self.assertAlmostEqual(fallback["cost"], 1.25)
+        self.assertAlmostEqual(fallback["week_cost"], 3.25)
+        self.assertEqual(fallback["cost_source"], "recorded")
         con.close()
 
     def test_compact_does_not_mutate_opencode_cache(self):

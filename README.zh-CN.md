@@ -1,8 +1,10 @@
 # CC Island（中文说明）
 
-> 把 AI 编程用量和主机状态，搬到你的 M5Stack StopWatch 手表上。
+<p align="center">
+  <a href="README.md">English</a> | 简体中文
+</p>
 
-[English README](README.md)
+> 把 AI 编程用量和主机状态，搬到你的 M5Stack StopWatch 手表上。
 
 <p align="center">
   <img src="firmware/tools/cc_island.svg" width="128" alt="CC Island 图标">
@@ -81,9 +83,10 @@ Bridge 运行在 WSL 时，还会自动检查挂载进来的 Windows 用户目�
 - OpenCode 配置 Go auth cookie 后显示**真实配额**（5 小时 / 每周 / 每月及重置）；
   未配置时显示本地今日 / 7 天用量
 
-界面以 `~$` 开头的金额表示 **API 等效价值**，不是实际账单。Claude/Codex 使用
-OpenRouter 当前公开价格目录折算；OpenCode 则直接采用它自己逐条 message 记录的
-`cost`。使用 Coding Plan、OpenCode Go 或其他订阅时，不会按这个金额重复扣费。
+界面以 `~$` 开头的金额表示 **API 等效价值**，不是实际账单。Claude、Codex 与能够
+识别模型的 OpenCode 都使用 OpenRouter 当前公开价格目录折算；未知 OpenCode 模型才
+回退它自己记录的金额。使用 Coding Plan、OpenCode Go 或其他订阅时，不会按这个金额
+重复扣费。
 
 可选的**系统页**显示 bridge 主机的电脑名、CPU、内存、磁盘占用与读写速率、网络
 上下行。运行在 WSL 时优先通过 PowerShell 读取 Windows 主机，互操作不可用时才回退
@@ -208,7 +211,8 @@ macOS 首次运行会弹蓝牙权限；Linux 需要可用的 BlueZ/D-Bus。仓�
   [`/api/v1/models`](https://openrouter.ai/api/v1/models)，并保留磁盘 last-good 缓存和
   小型离线兜底表。可用 `CC_PRICING_REFRESH_HOURS`、`CC_PRICING_CACHE` 覆盖默认值；
   `CC_CODEX_FALLBACK_MODEL` 决定隐藏模型 `codex-auto-review` 的等效计价，默认
-  `gpt-5.6-sol`
+  `gpt-5.6-sol`。OpenCode 的订阅/router provider ID 与模型发布者不一致时，会在结果
+  唯一的前提下按公开模型名匹配
 
 ## 数据来源与金额口径
 
@@ -220,18 +224,23 @@ macOS 首次运行会弹蓝牙权限；Linux 需要可用的 BlueZ/D-Bus。仓�
   用量接口；今天的 token 来自各平台 `~/.claude/projects/**/*.jsonl`
 - **OpenCode**：只读查询官方 XDG data 目录，三平台通常都是
   `~/.local/share/opencode/opencode.db`，也会识别 beta/dev channel 数据库；可用
-  `OPENCODE_DB` 或 `--db` 覆盖。Bridge 按 assistant message 的发生时间直接汇总
-  OpenCode 自己记录的 `cost` 和各类 token，因此跨日继续旧 session 也不会漏算；
-  该金额不会再经过 OpenRouter 价格表二次估算。旧数据库结构会回退到 session 累计值。
-  配置 `OPENCODE_GO_*` 后才会额外读取 Go 订阅窗口，并缓存 5 分钟
+  `OPENCODE_DB` 或 `--db` 覆盖。Bridge 按 assistant message 的发生时间汇总各类 token，
+  跨日继续旧 session 也不会漏算，并按时间、provider、模型与 token 指纹去除重复的
+  subagent 调用。已识别模型按 OpenRouter 折算等效价值，即使 Coding Plan 记录金额为 0
+  也能显示；未知模型和旧数据库结构才回退 OpenCode 的记录金额。`/json` 仍以
+  `actual_t` / `actual_d` 保留记录金额供诊断。配置 `OPENCODE_GO_*` 后才会额外读取 Go
+  订阅窗口，并缓存 5 分钟
 - **系统指标（可选）**：仅在 `CC_SYSTEM_MONITOR=true` 时采集；原生 Windows、macOS、
   Linux 使用 `psutil`，并有平台原生兜底。WSL 优先通过 PowerShell 读取 Windows 主机，
   失败后才显示 WSL 自身。关闭时 Bridge 不采集，也不会在 payload 中发送 `sys`
-- **`~$` 等效价值**：Claude/Codex 按 OpenRouter 动态模型目录估算，不是 Coding Plan
+- **`~$` 等效价值**：Claude、Codex 与已识别的 OpenCode 模型按 OpenRouter 动态目录
+  估算，不是 Coding Plan
   或订阅账单；bridge 只下载公开价格目录，不会上送本地凭证、prompt 或 usage。先精确
   匹配模型，再处理日期/provider 别名与离线兜底；仍未识别的模型继续计入 token，并在
-  `/json` 的 pricing diagnostics 中列出。Codex token 总量分别计入非缓存 input、
-  cached input、cache write 与 output 各一次；reasoning 已包含在 output 中，不重复相加
+  `/json` 的 pricing diagnostics 中列出，OpenCode 同时保留记录金额作为兜底。token
+  总量分别计入非缓存 input、cached input、cache write 与 output 各一次；Codex 的
+  reasoning 已包含在 output 中不重复相加，OpenCode 单独报告的 reasoning 按 output
+  价格加入一次
 
 最初的 provider 鉴权与本地日志读取方案改编自
 [CodexIsland](https://github.com/ericjypark/codex-island)；OpenCode、Wi-Fi polling、
