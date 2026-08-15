@@ -1,53 +1,71 @@
 # StopWatch Hub architecture
 
-StopWatch Hub is one ESP-IDF firmware image with multiple Mooncake apps. It is
-not a boot selector and it does not embed two standalone firmware images.
+StopWatch Hub is one ESP-IDF firmware image with multiple Mooncake Apps. It is
+not a boot selector and does not embed two standalone firmware images.
 
 ## Ownership
 
 | Resource | Sole owner | Consumers |
 | --- | --- | --- |
-| Display, touch, LVGL | M5Stack factory HAL | Launcher, CC Island, Bambu Status |
-| PMU, battery, vibration, audio, I2C | M5Stack factory HAL | All apps through HAL APIs |
-| Mooncake loop | `main.cpp` from factory firmware | All installed apps |
-| Wi-Fi station and credentials | `hub_wifi` | CC Island polling, Bambu MQTT/cloud |
-| Persistent configuration | shared hub storage (planned) | App-specific namespaces |
-| OTA slots and update policy | hub firmware (planned) | Whole combined image only |
+| Display, touch and LVGL task | M5Stack factory HAL | Official Apps, CC Island, PrintSphere |
+| PMU, battery, vibration, audio and I2C | M5Stack factory HAL | All Apps through HAL APIs |
+| Mooncake loop | Factory `main.cpp` | All installed Apps |
+| Wi-Fi driver, event loop, STA/AP netifs | `hub_wifi` | CC Island, PrintSphere, Badge AP handoff |
+| AI bridge configuration | CC Island build config | CC Island only |
+| Printer/cloud configuration | PrintSphere NVS namespace | PrintSphere; Wi-Fi handed to `hub_wifi` |
+| Uploaded PrintSphere sounds | `/spiflash/printsphere` | PrintSphere through factory FAT mount |
+| OTA slots and image policy | Combined hub firmware | PrintSphere Web Config OTA endpoints |
 
-An app must not call board initialization, create a second default event loop,
-or run its own infinite top-level loop.
+No App may initialize board hardware or create a second global network/display
+stack. PrintSphere's upstream submodule stays unchanged; the installer copies
+the complete business source and applies asserted platform adapters to the
+disposable factory-firmware checkout.
 
-`hub_wifi` is process-lifetime infrastructure. M5Stack's badge configuration
-portal may temporarily switch the global driver to AP mode through explicit
-exclusive-use hooks; station mode is restored when that session ends. App-level
-polling can pause independently without tearing down the shared station.
-
-## Port boundaries
+## Runtime shape
 
 ```text
-Bambu Status (Mooncake App)
-    UI construction, input, onOpen/onRunning/onClose
-                    |
-                    v
-printsphere_m5
-    C152 lifecycle adapter and future shared-service bindings
-                    |
-                    v
-printsphere_core
-    printer state, status parsing, MQTT/cloud protocol logic
+M5Stack StopWatch V0.5 / Mooncake
+├── official Apps
+├── CC Island App
+│   ├── BLE NUS
+│   └── HTTP polling ─────────────┐
+├── PrintSphere App               │
+│   └── printsphere_m5 lifecycle  │
+│       └── complete v1.6.2       │
+│           ├── LAN/cloud MQTT ───┤
+│           ├── REST/2FA/preview  ├── hub_wifi ── ESP-IDF Wi-Fi
+│           ├── JPEG camera ──────┤
+│           └── Web Config :8080 ─┘
+└── M5Stack HAL
+    ├── display/touch/LVGL
+    ├── PMU/audio/vibration
+    └── FAT/NVS
 ```
-
-`printsphere_core` keeps upstream PrintSphere names where that reduces porting
-diffs. `printsphere_m5` is the only layer allowed to translate between the core
-and StopWatch/Mooncake facilities.
 
 ## Lifecycle contract
 
-- `onCreate`: initialize cheap process-lifetime state only.
-- `onOpen`: create the app UI and resume status work.
-- `onRunning`: update the core and copy snapshots into LVGL under the HAL lock.
-- `onClose`: pause expensive preview/camera work, release the app UI, and leave
-  no app-owned LVGL objects behind.
+- `onCreate` starts PrintSphere's process-lifetime state/network task and
+  creates its hidden private LVGL root under the official active screen.
+- `onOpen` reveals the root, resumes App-scoped UI policy and leases the saved
+  display/touch rotation through M5GFX + LVGL.
+- `onRunning` handles Mooncake go-home input; PrintSphere workers remain
+  independent and non-blocking.
+- `onClose` hides the root, restores official rotation and brightness, and
+  stops camera/preview work. Low-rate MQTT/state work may stay warm.
 
-The initial vertical slice intentionally has no Bambu networking. This proves
-the app/core/platform boundary without risking a second `esp_wifi_init()`.
+## Shared Wi-Fi and AP ownership
+
+`hub_wifi` is process-lifetime infrastructure. It accepts a build-time CC
+Island fallback plus persistent credentials loaded by PrintSphere, supports
+STA/APSTA, scan and reconnect, and disables the PrintSphere setup AP after a
+station address is acquired. M5Stack's Badge configuration page may temporarily
+take exclusive AP control; explicit hooks stop reconnect races and restore the
+previous shared mode afterward.
+
+## OTA boundary
+
+Both 6 MiB app partitions contain the entire official firmware plus both Apps.
+PrintSphere's upload and URL OTA flows remain available, but each candidate is
+checked for ESP app project name `StopWatch-UserDemo`. Standalone upstream
+PrintSphere images are deliberately rejected because they would remove CC
+Island and the official firmware shell.

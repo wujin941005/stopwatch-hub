@@ -10,15 +10,35 @@ StopWatch Hub 是面向 **M5Stack StopWatch C152** 的多 App 固件工程：设
 | App | 用途 | 当前状态 |
 | --- | --- | --- |
 | **CC Island** | AI 编程用量与主机监控 | 原有 App 保留 |
-| **Bambu Status** | 基于 PrintSphere 的拓竹打印状态显示 | 正在移植 |
+| **PrintSphere** | 完整拓竹打印状态、相机与控制 | v1.6.2 已集成，待真机验收 |
 
 移植工程阶段仓库保持私有。仓库采用混合许可证：CC Island/通用集成代码为 MIT；
 PrintSphere 衍生文件为 FNCL v1.1，未经版权方另行书面授权仅限非商业用途。详见
 [LICENSE](LICENSE) 和 [NOTICE.md](NOTICE.md)。
 
-当前 Bambu Status 纵向切片已能注册到启动器，遵循 Mooncake 的打开/运行/关闭生命周期，
-并链接已移入的打印机状态与 Bambu 状态解析核心。Bambu 网络和配置尚未启用，因此页面
-暂时显示 “Setup required”。进度见 [移植状态](docs/porting-status.md)。
+当前集成的是固定版本 PrintSphere v1.6.2 的完整源码，不是精简 LAN 状态页。合并固件
+已经完整编译通过，并能放进两个 6 MiB OTA 槽；仍需 C152 真机验收。进度与边界见
+[移植状态](docs/porting-status.md)。
+
+## PrintSphere
+
+启动器里的 **PrintSphere** App 保留上游 LAN/Cloud MQTT、Cloud REST 登录与 2FA、
+Hybrid 数据源、多打印机、AMS 与完整错误详情、云端封面、本地 JPEG 相机、打印控制、
+带 PIN 的 Web Config、Wi-Fi 扫描与 fallback AP、时区、屏幕旋转、提示音与自定义 WAV、
+USB Improv 配网以及 OTA。
+
+移植改变的是硬件归属，不是删功能：
+
+- 显示、触摸、LVGL、PMU、音频、I2C 与文件系统仍只由 M5Stack 官方 HAL 初始化一次；
+- PrintSphere 与 CC Island 共同使用一个 `hub_wifi`，官方 Badge 配置 AP 可临时接管后归还；
+- PrintSphere 作为独立 Mooncake App 打开；退出时隐藏私有 UI、恢复亮度和方向，并暂停
+  相机/封面重任务；
+- Web Config 地址为 `http://手表IP:8080`；fallback AP 页面为
+  `http://192.168.4.1:8080`，密码 `printsphere`；
+- OTA 只接受合并后的 `StopWatch-UserDemo` 镜像，拒绝会覆盖其他 App 的上游独立镜像。
+
+最终镜像为 5,718,240 字节（`0x5740e0`），每个 6 MiB OTA 槽还剩 573,216 字节
+（`0x8bf20`，9%）。
 
 ## CC Island
 
@@ -157,7 +177,10 @@ cd build-firmware && idf.py build && idf.py -p /dev/cu.usbmodemXXXX flash
 ```
 `install_firmware.sh` 只把 `CC_*` 配置写进同样被忽略的 `build-firmware/`；Git 跟踪
 的源码只保留占位值。Wi-Fi 名称和密码会随固件写入手表；provider API 凭证与
-OpenCode Cookie 始终留在 bridge 主机。刷完后在表上**打开一次 CC Island app**以启动传输。
+OpenCode Cookie 始终留在 bridge 主机。PrintSphere 也可在运行时配 Wi-Fi，并把打印机、
+Cloud 等设置放在自己的 NVS namespace；它的低频状态服务与 8080 端口 Web Config
+随 Mooncake 创建启动。打开 **CC Island** 后才会启动它的 BLE/HTTP 传输；打开
+**PrintSphere** 后显示完整界面并启用屏幕、相机等 App 范围的工作。
 
 **2. 跑 bridge（两种模式，任选其一）**
 
@@ -224,7 +247,7 @@ macOS 首次运行会弹蓝牙权限；Linux 需要可用的 BlueZ/D-Bus。仓�
   ```bash
   uv run --with svglib --with pillow --with reportlab --with rlpycairo \
     python firmware/tools/gen_icons.py
-  python firmware/tools/gen_bambu_status_icon.py
+  python firmware/tools/gen_printsphere_icon.py
   ```
 - **动态定价** — bridge 每 6 小时刷新 OpenRouter 公开的
   [`/api/v1/models`](https://openrouter.ai/api/v1/models)，并保留磁盘 last-good 缓存和

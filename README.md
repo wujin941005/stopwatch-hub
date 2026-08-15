@@ -11,17 +11,41 @@ hosting independently scoped apps:
 | App | Purpose | Status |
 | --- | --- | --- |
 | **CC Island** | AI coding usage and host monitoring | Existing app preserved |
-| **Bambu Status** | PrintSphere-derived Bambu printer display | Port in progress |
+| **PrintSphere** | Complete Bambu printer display and control | v1.6.2 integrated; device validation pending |
 
 The repository is private while the port is being engineered. It contains
 mixed-license code: CC Island/integration code is MIT, while PrintSphere-derived
 files are FNCL v1.1 and restricted to non-commercial use. See
 [LICENSE](LICENSE) and [NOTICE.md](NOTICE.md).
 
-The current Bambu Status slice registers in the launcher, cleanly follows
-Mooncake lifecycle callbacks, and links the imported printer state/status core.
-Bambu networking and setup are not enabled yet, so the app currently reports
-“Setup required.” See [porting status](docs/porting-status.md).
+The complete pinned PrintSphere v1.6.2 source is integrated as a launcher App,
+not reduced to a LAN status page. The combined firmware builds successfully and
+fits dual 6 MiB OTA slots. Physical C152 acceptance testing remains; see the
+[porting status](docs/porting-status.md).
+
+## PrintSphere
+
+The **PrintSphere** App preserves upstream LAN and Cloud MQTT, Cloud REST login
+and 2FA, hybrid source selection, multiple printers, AMS/error detail, cover
+preview, supported local JPEG cameras, printer controls, Web Config + PIN,
+Wi-Fi scan/fallback AP, time zone, display rotation, sound events/custom WAV,
+USB Improv provisioning and OTA.
+
+The adaptations are ownership changes rather than feature removals:
+
+- M5Stack's factory HAL remains the only display, touch, LVGL, PMU, codec, I2C
+  and filesystem owner.
+- PrintSphere and CC Island share one `hub_wifi` station; the factory Badge AP
+  can temporarily take and safely return Wi-Fi ownership.
+- PrintSphere appears as its own Mooncake App. Closing it hides its private UI,
+  restores display/brightness state and pauses camera/preview work.
+- Web Config is `http://<watch-ip>:8080`; its fallback AP page is
+  `http://192.168.4.1:8080` (password `printsphere`).
+- OTA accepts only a combined `StopWatch-UserDemo` image, never an upstream
+  standalone PrintSphere image that would erase the other Apps.
+
+The measured image is 5,718,240 bytes (`0x5740e0`), leaving 573,216 bytes
+(`0x8bf20`, 9%) in each 6 MiB OTA slot.
 
 ## CC Island
 
@@ -181,14 +205,17 @@ stopwatch-hub/
 │   │   ├── ble/ble_nus.{h,cpp}     #   NimBLE Nordic UART Service (BLE transport)
 │   │   ├── net/net.{h,cpp,config.h}#   Wi-Fi station + HTTP polling
 │   │   └── debug/                  #   USB Serial JTAG framebuffer capture
-│   ├── app_bambu_status/          # Mooncake UI/lifecycle for Bambu Status
-│   ├── printsphere_core/          # hardware-independent PrintSphere-derived core
-│   ├── printsphere_m5/            # C152/Mooncake platform adapter
+│   ├── app_printsphere/           # PrintSphere Mooncake App lifecycle
+│   ├── printsphere_core/          # small host-testable state/status mirror
+│   ├── printsphere_m5/            # C152/Mooncake lifecycle adapter
+│   ├── hub_wifi/                  # one Wi-Fi owner shared by both Apps
 │   ├── partitions.csv             # dual 6 MiB OTA + FAT layout for 16 MiB flash
 │   ├── assets/                    # generated LVGL RGB565 logo bitmaps (.c)
 │   └── tools/                     # SVG sources + bitmap generator; includes CC Island icon
+├── vendor/PrintSphere/            # pinned full upstream Git submodule (unchanged)
 ├── scripts/
-│   ├── install_firmware.sh        # clone factory fw + integrate app_codex
+│   ├── install_firmware.sh        # clone V0.5 + integrate both Apps and services
+│   ├── prepare_printsphere_port.py# materialize full source + asserted M5 adapters
 │   └── setup_autostart.sh         # install the bridge as a login LaunchAgent
 ├── tools/screenshot.py            # capture the watch framebuffer as PNG
 └── docs/
@@ -237,7 +264,11 @@ idf.py -p /dev/cu.usbmodemXXXX flash
 `build-firmware` checkout. Tracked source files keep placeholders only.
 The Wi-Fi SSID/password are therefore present in the firmware image; provider
 API credentials and OpenCode cookies remain on the bridge host.
-On the watch, open the **CC Island** app once after boot to start its transports.
+PrintSphere also supports runtime Wi-Fi setup and stores printer/cloud settings
+in its own NVS namespace. Its Web Config and low-rate state service start during
+Mooncake creation and listen on port 8080. Open **CC Island** to start its BLE
+and HTTP transports; opening **PrintSphere** reveals its dashboard and enables
+its App-scoped display/camera work.
 
 ### 2. Run the bridge
 
@@ -329,7 +360,7 @@ transport.
   ```bash
   uv run --with svglib --with pillow --with reportlab --with rlpycairo \
     python firmware/tools/gen_icons.py       # rewrites firmware/assets/*.c
-  python firmware/tools/gen_bambu_status_icon.py
+  python firmware/tools/gen_printsphere_icon.py
   ```
 - **Pricing** — the bridge refreshes OpenRouter's public
   [`/api/v1/models`](https://openrouter.ai/api/v1/models) catalog every six
