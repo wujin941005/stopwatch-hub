@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
-# Integrate the CC Island app into a fresh M5Stack StopWatch factory-firmware
-# checkout, then you can build + flash with ESP-IDF.
+# Integrate the StopWatch Hub apps into a fresh M5Stack StopWatch
+# factory-firmware checkout, then build + flash with ESP-IDF.
 #
 # Usage:
 #   scripts/install_firmware.sh [TARGET_DIR]
@@ -14,7 +14,7 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TARGET="${1:-$REPO_ROOT/build-firmware}"
 FACTORY_GIT="https://github.com/m5stack/M5StopWatch-UserDemo.git"
 
-echo "==> CC Island firmware integration"
+echo "==> StopWatch Hub firmware integration"
 echo "    repo:   $REPO_ROOT"
 echo "    target: $TARGET"
 
@@ -25,12 +25,24 @@ if [ ! -d "$TARGET/.git" ]; then
 fi
 
 # 2. Fetch the firmware's component dependencies (M5GFX, lvgl, mooncake, ...).
-echo "==> Fetching firmware dependencies..."
-( cd "$TARGET" && python3 ./fetch_repos.py )
+#    The opt-out is useful for a copied, already-populated offline build tree.
+if [ "${STOPWATCH_HUB_SKIP_FETCH:-0}" = "1" ]; then
+  echo "==> Skipping firmware dependency fetch (STOPWATCH_HUB_SKIP_FETCH=1)"
+else
+  echo "==> Fetching firmware dependencies..."
+  ( cd "$TARGET" && python3 ./fetch_repos.py )
+fi
 
-# 3. Drop in the CC Island app + generated brand-logo bitmaps.
-echo "==> Copying app_codex + assets..."
-mkdir -p "$TARGET/main/apps/app_codex/ble" "$TARGET/main/apps/app_codex/net" "$TARGET/main/apps/app_codex/debug" "$TARGET/main/assets/images"
+# 3. Drop in both apps, the PrintSphere core/platform boundary, and assets.
+echo "==> Copying StopWatch Hub apps, services, platform adapters, and assets..."
+mkdir -p "$TARGET/main/apps/app_codex/ble" \
+         "$TARGET/main/apps/app_codex/net" \
+         "$TARGET/main/apps/app_codex/debug" \
+         "$TARGET/main/apps/app_bambu_status" \
+         "$TARGET/main/services/printsphere_core/include/printsphere" \
+         "$TARGET/main/services/printsphere_core/src" \
+         "$TARGET/main/platform/printsphere_m5" \
+         "$TARGET/main/assets/images"
 cp "$REPO_ROOT"/firmware/app_codex/app_codex.h          "$TARGET/main/apps/app_codex/"
 cp "$REPO_ROOT"/firmware/app_codex/app_codex.cpp        "$TARGET/main/apps/app_codex/"
 cp "$REPO_ROOT"/firmware/app_codex/app_codex_config.h   "$TARGET/main/apps/app_codex/"
@@ -45,6 +57,24 @@ cp "$REPO_ROOT"/firmware/assets/logo_claude.c           "$TARGET/main/assets/ima
 cp "$REPO_ROOT"/firmware/assets/logo_codex.c            "$TARGET/main/assets/images/"
 cp "$REPO_ROOT"/firmware/assets/logo_opencode.c         "$TARGET/main/assets/images/"
 cp "$REPO_ROOT"/firmware/assets/icon_cc_island.c        "$TARGET/main/assets/images/"
+cp "$REPO_ROOT"/firmware/app_bambu_status/app_bambu_status.h \
+   "$TARGET/main/apps/app_bambu_status/"
+cp "$REPO_ROOT"/firmware/app_bambu_status/app_bambu_status.cpp \
+   "$TARGET/main/apps/app_bambu_status/"
+cp "$REPO_ROOT"/firmware/printsphere_core/include/printsphere/printer_state.hpp \
+   "$TARGET/main/services/printsphere_core/include/printsphere/"
+cp "$REPO_ROOT"/firmware/printsphere_core/include/printsphere/bambu_status.hpp \
+   "$TARGET/main/services/printsphere_core/include/printsphere/"
+cp "$REPO_ROOT"/firmware/printsphere_core/src/printer_state.cpp \
+   "$TARGET/main/services/printsphere_core/src/"
+cp "$REPO_ROOT"/firmware/printsphere_core/src/bambu_status.cpp \
+   "$TARGET/main/services/printsphere_core/src/"
+cp "$REPO_ROOT"/firmware/printsphere_m5/printsphere_runtime.h \
+   "$TARGET/main/platform/printsphere_m5/"
+cp "$REPO_ROOT"/firmware/printsphere_m5/printsphere_runtime.cpp \
+   "$TARGET/main/platform/printsphere_m5/"
+cp "$REPO_ROOT"/firmware/assets/icon_bambu_status.c     "$TARGET/main/assets/images/"
+cp "$REPO_ROOT"/firmware/partitions.csv                 "$TARGET/partitions.csv"
 # Remove the pre-CC-Island launcher asset when upgrading an existing checkout.
 rm -f "$TARGET/main/assets/images/icon_codex.c"
 
@@ -140,11 +170,30 @@ def insert_after(path, anchor, line):
 insert_after("main/apps/apps.h",
              '#include "app_template/app_template.h"',
              '#include "app_codex/app_codex.h"')
+insert_after("main/apps/apps.h",
+             '#include "app_codex/app_codex.h"',
+             '#include "app_bambu_status/app_bambu_status.h"')
 
 # main.cpp: install the app
 insert_after("main/main.cpp",
              "GetMooncake().installApp(std::make_unique<AppSetup>());",
              "    GetMooncake().installApp(std::make_unique<AppCodex>());")
+insert_after("main/main.cpp",
+             "GetMooncake().installApp(std::make_unique<AppCodex>());",
+             "    GetMooncake().installApp(std::make_unique<AppBambuStatus>());")
+
+# main CMakeLists: compile service/platform sources and expose core headers.
+insert_after("main/CMakeLists.txt",
+             '    "apps/*.cpp"',
+             '    "services/*.c"\n'
+             '    "services/*.cc"\n'
+             '    "services/*.cpp"\n'
+             '    "platform/*.c"\n'
+             '    "platform/*.cc"\n'
+             '    "platform/*.cpp"')
+insert_after("main/CMakeLists.txt",
+             '    "."',
+             '    "services/printsphere_core/include"')
 
 # assets.h: declare the images
 assets_h = root / "main/assets/assets.h"
@@ -154,9 +203,18 @@ assets_h.write_text(assets_text)
 
 insert_after("main/assets/assets.h",
              "LV_IMG_DECLARE(icon_watch_face);",
-             "LV_IMG_DECLARE(icon_cc_island);\n"
-             "LV_IMG_DECLARE(logo_claude);\n"
-             "LV_IMG_DECLARE(logo_codex);\n"
+             "LV_IMG_DECLARE(icon_cc_island);")
+insert_after("main/assets/assets.h",
+             "LV_IMG_DECLARE(icon_cc_island);",
+             "LV_IMG_DECLARE(icon_bambu_status);")
+insert_after("main/assets/assets.h",
+             "LV_IMG_DECLARE(icon_bambu_status);",
+             "LV_IMG_DECLARE(logo_claude);")
+insert_after("main/assets/assets.h",
+             "LV_IMG_DECLARE(logo_claude);",
+             "LV_IMG_DECLARE(logo_codex);")
+insert_after("main/assets/assets.h",
+             "LV_IMG_DECLARE(logo_codex);",
              "LV_IMG_DECLARE(logo_opencode);")
 
 # sdkconfig.defaults: enable NimBLE (BLE transport) + Wi-Fi (polling transport)

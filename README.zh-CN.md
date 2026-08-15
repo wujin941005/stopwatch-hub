@@ -1,8 +1,26 @@
-# CC Island（中文说明）
+# StopWatch Hub（中文说明）
 
 <p align="center">
   <a href="README.md">English</a> | 简体中文
 </p>
+
+StopWatch Hub 是面向 **M5Stack StopWatch C152** 的多 App 固件工程：设备上仍然只有
+一份 ESP-IDF 固件、一个 M5Stack/Mooncake 硬件所有者，但可以安装多个职责明确的 App。
+
+| App | 用途 | 当前状态 |
+| --- | --- | --- |
+| **CC Island** | AI 编程用量与主机监控 | 原有 App 保留 |
+| **Bambu Status** | 基于 PrintSphere 的拓竹打印状态显示 | 正在移植 |
+
+移植工程阶段仓库保持私有。仓库采用混合许可证：CC Island/通用集成代码为 MIT；
+PrintSphere 衍生文件为 FNCL v1.1，未经版权方另行书面授权仅限非商业用途。详见
+[LICENSE](LICENSE) 和 [NOTICE.md](NOTICE.md)。
+
+当前 Bambu Status 纵向切片已能注册到启动器，遵循 Mooncake 的打开/运行/关闭生命周期，
+并链接已移入的打印机状态与 Bambu 状态解析核心。Bambu 网络和配置尚未启用，因此页面
+暂时显示 “Setup required”。进度见 [移植状态](docs/porting-status.md)。
+
+## CC Island
 
 > 把 AI 编程用量和主机状态，搬到你的 M5Stack StopWatch 手表上。
 
@@ -206,6 +224,7 @@ macOS 首次运行会弹蓝牙权限；Linux 需要可用的 BlueZ/D-Bus。仓�
   ```bash
   uv run --with svglib --with pillow --with reportlab --with rlpycairo \
     python firmware/tools/gen_icons.py
+  python firmware/tools/gen_bambu_status_icon.py
   ```
 - **动态定价** — bridge 每 6 小时刷新 OpenRouter 公开的
   [`/api/v1/models`](https://openrouter.ai/api/v1/models)，并保留磁盘 last-good 缓存和
@@ -308,4 +327,6 @@ WSL2 默认 NAT，手表无法直接访问 WSL 里监听的端口，二选一：
 
 ## 许可证
 
-MIT，见 [LICENSE](LICENSE)。
+这是混合许可证仓库。CC Island 与原有通用集成代码使用 MIT；PrintSphere 衍生移植文件
+使用 FNCL v1.1，未经另行授权仅限非商业用途。详见 [LICENSE](LICENSE)、
+[NOTICE.md](NOTICE.md) 和各源码文件的 SPDX 标识。

@@ -1,0 +1,32 @@
+name: Firmware core tests
+
+on:
+  push:
+    paths:
+      - ".github/workflows/firmware-core-tests.yml"
+      - "firmware/printsphere_core/**"
+      - "tests/printsphere_core_smoke.cpp"
+  pull_request:
+    paths:
+      - ".github/workflows/firmware-core-tests.yml"
+      - "firmware/printsphere_core/**"
+      - "tests/printsphere_core_smoke.cpp"
+
+permissions:
+  contents: read
+
+jobs:
+  host-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: Build hardware-independent core smoke test
+        run: >-
+          g++ -std=c++17 -Wall -Wextra -Werror -pthread
+          -Ifirmware/printsphere_core/include
+          firmware/printsphere_core/src/printer_state.cpp
+          firmware/printsphere_core/src/bambu_status.cpp
+          tests/printsphere_core_smoke.cpp
+          -o /tmp/printsphere_core_smoke
+      - name: Run smoke test
+        run: /tmp/printsphere_core_smoke

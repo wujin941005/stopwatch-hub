@@ -1,0 +1,15 @@
+{
+  "name": "PrintSphere",
+  "repository": "https://github.com/cptkirki/PrintSphere.git",
+  "version": "v1.6.2",
+  "commit": "ed071d11dd09c2c93abdba62d8458e4b592f79d0",
+  "license": "LicenseRef-FNCL-1.1",
+  "imported_at": "2026-08-15",
+  "strategy": "vendored-selected-sources",
+  "modifications": [
+    "Split hardware-independent state and status parsing into printsphere_core",
+    "Replace the standalone application loop with Mooncake lifecycle callbacks",
+    "Use the M5Stack factory HAL as the sole display, touch, PMU, audio, and LVGL owner",
+    "Do not include PrintSphere standalone OTA or serial provisioning"
+  ]
+}

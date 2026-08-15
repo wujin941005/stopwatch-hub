@@ -1,8 +1,29 @@
-# CC Island
+# StopWatch Hub
 
 <p align="center">
   English | <a href="README.zh-CN.md">简体中文</a>
 </p>
+
+StopWatch Hub is a multi-app firmware integration for the **M5Stack StopWatch
+C152**. It keeps one ESP-IDF image and one M5Stack/Mooncake hardware owner while
+hosting independently scoped apps:
+
+| App | Purpose | Status |
+| --- | --- | --- |
+| **CC Island** | AI coding usage and host monitoring | Existing app preserved |
+| **Bambu Status** | PrintSphere-derived Bambu printer display | Port in progress |
+
+The repository is private while the port is being engineered. It contains
+mixed-license code: CC Island/integration code is MIT, while PrintSphere-derived
+files are FNCL v1.1 and restricted to non-commercial use. See
+[LICENSE](LICENSE) and [NOTICE.md](NOTICE.md).
+
+The current Bambu Status slice registers in the launcher, cleanly follows
+Mooncake lifecycle callbacks, and links the imported printer state/status core.
+Bambu networking and setup are not enabled yet, so the app currently reports
+“Setup required.” See [porting status](docs/porting-status.md).
+
+## CC Island
 
 > AI coding usage and host health, living on your wrist.
 >
@@ -149,7 +170,7 @@ computed numbers do.
 ## Repo layout
 
 ```
-cc-island/
+stopwatch-hub/
 ├── bridge/codexisland_bridge.py   # data + BLE push + HTTP server
 ├── pyproject.toml                 # bridge metadata + dependencies
 ├── uv.lock                        # reproducible Windows/macOS/Linux environment
@@ -160,6 +181,10 @@ cc-island/
 │   │   ├── ble/ble_nus.{h,cpp}     #   NimBLE Nordic UART Service (BLE transport)
 │   │   ├── net/net.{h,cpp,config.h}#   Wi-Fi station + HTTP polling
 │   │   └── debug/                  #   USB Serial JTAG framebuffer capture
+│   ├── app_bambu_status/          # Mooncake UI/lifecycle for Bambu Status
+│   ├── printsphere_core/          # hardware-independent PrintSphere-derived core
+│   ├── printsphere_m5/            # C152/Mooncake platform adapter
+│   ├── partitions.csv             # dual 6 MiB OTA + FAT layout for 16 MiB flash
 │   ├── assets/                    # generated LVGL RGB565 logo bitmaps (.c)
 │   └── tools/                     # SVG sources + bitmap generator; includes CC Island icon
 ├── scripts/
@@ -198,7 +223,7 @@ cp .env.example .env
 # edit Wi-Fi, bridge host, layout, intervals, optional system monitoring,
 # and optional OpenCode Go fields
 
-# integrate the app into a fresh factory-firmware checkout
+# integrate both StopWatch Hub apps into a fresh factory-firmware checkout
 ./scripts/install_firmware.sh           # clones into ./build-firmware
 
 # build + flash
@@ -304,6 +329,7 @@ transport.
   ```bash
   uv run --with svglib --with pillow --with reportlab --with rlpycairo \
     python firmware/tools/gen_icons.py       # rewrites firmware/assets/*.c
+  python firmware/tools/gen_bambu_status_icon.py
   ```
 - **Pricing** — the bridge refreshes OpenRouter's public
   [`/api/v1/models`](https://openrouter.ai/api/v1/models) catalog every six
@@ -446,4 +472,7 @@ directly. Either:
 
 ## License
 
-MIT — see [LICENSE](LICENSE). (Trademark notice above applies to the brand logos.)
+This is a mixed-license repository. CC Island and the original integration code
+are MIT; PrintSphere-derived port files use FNCL v1.1 and are non-commercial
+unless separately licensed. See [LICENSE](LICENSE), [NOTICE.md](NOTICE.md), and
+the per-file SPDX identifiers.

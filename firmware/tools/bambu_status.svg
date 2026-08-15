@@ -1,0 +1,9 @@
+<!-- SPDX-License-Identifier: MIT -->
+<svg xmlns="http://www.w3.org/2000/svg" width="200" height="200" viewBox="0 0 200 200">
+  <rect width="200" height="200" fill="#000000"/>
+  <circle cx="100" cy="100" r="73" fill="#07110F" stroke="#15352D" stroke-width="6"/>
+  <path d="M60 53 H140 V132 H60 Z" fill="none" stroke="#20C997" stroke-width="9" stroke-linejoin="round"/>
+  <path d="M73 71 H127 M100 71 V91 M88 91 H112 L106 105 H94 Z" fill="none" stroke="#DFFCF4" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M76 119 H124 M70 146 H130" fill="none" stroke="#20C997" stroke-width="9" stroke-linecap="round"/>
+  <circle cx="100" cy="105" r="5" fill="#DFFCF4"/>
+</svg>

@@ -1,0 +1,9 @@
+# SPDX-License-Identifier: MIT
+# Name,   Type, SubType,  Offset,   Size,     Flags
+nvs,      data, nvs,      0x9000,   0x10000,
+otadata,  data, ota,      0x19000,  0x2000,
+phy_init, data, phy,      0x1b000,  0x1000,
+ota_0,    app,  ota_0,    0x20000,  0x600000,
+ota_1,    app,  ota_1,    0x620000, 0x600000,
+storage,  data, fat,      0xc20000, 0x3d0000,
+coredump, data, coredump, 0xff0000, 0x10000,

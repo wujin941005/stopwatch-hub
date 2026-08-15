@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Render brand SVGs to LVGL v9 RGB565 C arrays for app_codex.
+"""Render StopWatch Hub SVGs to LVGL v9 RGB565 C arrays.
 
 Pipeline: SVG --(svglib/reportlab, scaled via dpi)--> black-on-white raster
 --> coverage mask --> tint with brand color on black --> RGB565 LE --> .c file
