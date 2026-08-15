@@ -912,6 +912,7 @@ void AppCodex::onClose()
 {
     mclog::tagInfo(getAppInfo().name, "on close");
 
+    net::suspend();
     _key_manager.reset();
 
     LvglLockGuard lock;

@@ -9,6 +9,8 @@ projects or trademarks.
 - Source: https://github.com/wujin941005/cc-island
 - Direct upstream: https://github.com/alexjc-tech/cc-island
 - Firmware foundation: https://github.com/m5stack/M5StopWatch-UserDemo
+- Pinned firmware version: V0.5 at
+  `6b4aa125288b6fe9dca661f10159f6e1e5ee785c`
 - License: MIT (`LICENSES/MIT.txt`)
 
 The `bridge/`, `firmware/app_codex/`, related assets, and their integration

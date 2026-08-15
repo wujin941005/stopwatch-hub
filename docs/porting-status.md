@@ -10,7 +10,7 @@ Pinned source: PrintSphere v1.6.2 at
 | Bambu status/model parsing | Imported | Host smoke tests included |
 | Mooncake app lifecycle | Skeleton | Opens, updates, closes cleanly |
 | C152 platform adapter | Skeleton | No duplicate HAL initialization |
-| Shared Wi-Fi owner | Next | CC Island currently owns its station task |
+| Shared Wi-Fi owner | First slice done | `hub_wifi`; CC polling migrated; setup AP coordinated |
 | LAN/cloud MQTT | Pending | Import after shared Wi-Fi is in place |
 | Config/setup UI | Pending | Use hub storage; do not import standalone portal unchanged |
 | Preview/camera | Pending | Must pause on app close; allocate from PSRAM |
@@ -26,10 +26,10 @@ to be measured after MQTT, TLS, preview, and error lookup are integrated.
 ## Validation snapshot (2026-08-15)
 
 - ESP-IDF v5.5.4 full build from a fresh factory-firmware checkout: passed.
-- Generated image: 4,140,816 bytes (`0x3f2f10`).
+- Generated image with shared Wi-Fi ownership: 4,144,224 bytes (`0x3f3c60`).
 - Existing CC Island image used as baseline: 4,051,712 bytes.
-- Current vertical-slice increase: 89,104 bytes.
-- Free space in each 6 MiB OTA slot: 2,150,640 bytes (`0x20d0f0`, 34%).
+- Current vertical-slice increase: 92,512 bytes.
+- Free space in each 6 MiB OTA slot: 2,147,232 bytes (`0x20c3a0`, 34%).
 - Host C++17 smoke test for state/model/status parsing: passed with
   `-Wall -Wextra -Werror`.
 

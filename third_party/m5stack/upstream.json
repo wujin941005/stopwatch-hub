@@ -1,0 +1,8 @@
+{
+  "name": "M5StopWatch-UserDemo",
+  "repository": "https://github.com/m5stack/M5StopWatch-UserDemo.git",
+  "version": "V0.5",
+  "commit": "6b4aa125288b6fe9dca661f10159f6e1e5ee785c",
+  "license": "MIT",
+  "strategy": "pinned-generated-checkout"
+}

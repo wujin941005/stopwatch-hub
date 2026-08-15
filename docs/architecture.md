@@ -10,12 +10,17 @@ not a boot selector and it does not embed two standalone firmware images.
 | Display, touch, LVGL | M5Stack factory HAL | Launcher, CC Island, Bambu Status |
 | PMU, battery, vibration, audio, I2C | M5Stack factory HAL | All apps through HAL APIs |
 | Mooncake loop | `main.cpp` from factory firmware | All installed apps |
-| Wi-Fi station and credentials | shared hub service (planned) | CC Island polling, Bambu MQTT/cloud |
+| Wi-Fi station and credentials | `hub_wifi` | CC Island polling, Bambu MQTT/cloud |
 | Persistent configuration | shared hub storage (planned) | App-specific namespaces |
 | OTA slots and update policy | hub firmware (planned) | Whole combined image only |
 
 An app must not call board initialization, create a second default event loop,
 or run its own infinite top-level loop.
+
+`hub_wifi` is process-lifetime infrastructure. M5Stack's badge configuration
+portal may temporarily switch the global driver to AP mode through explicit
+exclusive-use hooks; station mode is restored when that session ends. App-level
+polling can pause independently without tearing down the shared station.
 
 ## Port boundaries
 

@@ -13,6 +13,8 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TARGET="${1:-$REPO_ROOT/build-firmware}"
 FACTORY_GIT="https://github.com/m5stack/M5StopWatch-UserDemo.git"
+FACTORY_TAG="V0.5"
+FACTORY_COMMIT="6b4aa125288b6fe9dca661f10159f6e1e5ee785c"
 
 echo "==> StopWatch Hub firmware integration"
 echo "    repo:   $REPO_ROOT"
@@ -21,7 +23,13 @@ echo "    target: $TARGET"
 # 1. Clone the factory firmware (MIT, by M5Stack) if not already present.
 if [ ! -d "$TARGET/.git" ]; then
   echo "==> Cloning factory firmware..."
-  git clone "$FACTORY_GIT" "$TARGET"
+  git clone --branch "$FACTORY_TAG" --single-branch "$FACTORY_GIT" "$TARGET"
+fi
+
+FACTORY_HEAD="$(git -C "$TARGET" rev-parse HEAD)"
+if [ "$FACTORY_HEAD" != "$FACTORY_COMMIT" ]; then
+  echo "WARNING: factory checkout is $FACTORY_HEAD, validated commit is $FACTORY_COMMIT"
+  echo "         Existing checkouts are never reset automatically."
 fi
 
 # 2. Fetch the firmware's component dependencies (M5GFX, lvgl, mooncake, ...).
@@ -41,6 +49,7 @@ mkdir -p "$TARGET/main/apps/app_codex/ble" \
          "$TARGET/main/apps/app_bambu_status" \
          "$TARGET/main/services/printsphere_core/include/printsphere" \
          "$TARGET/main/services/printsphere_core/src" \
+         "$TARGET/main/services/hub_wifi" \
          "$TARGET/main/platform/printsphere_m5" \
          "$TARGET/main/assets/images"
 cp "$REPO_ROOT"/firmware/app_codex/app_codex.h          "$TARGET/main/apps/app_codex/"
@@ -69,6 +78,10 @@ cp "$REPO_ROOT"/firmware/printsphere_core/src/printer_state.cpp \
    "$TARGET/main/services/printsphere_core/src/"
 cp "$REPO_ROOT"/firmware/printsphere_core/src/bambu_status.cpp \
    "$TARGET/main/services/printsphere_core/src/"
+cp "$REPO_ROOT"/firmware/hub_wifi/hub_wifi.h \
+   "$TARGET/main/services/hub_wifi/"
+cp "$REPO_ROOT"/firmware/hub_wifi/hub_wifi.cpp \
+   "$TARGET/main/services/hub_wifi/"
 cp "$REPO_ROOT"/firmware/printsphere_m5/printsphere_runtime.h \
    "$TARGET/main/platform/printsphere_m5/"
 cp "$REPO_ROOT"/firmware/printsphere_m5/printsphere_runtime.cpp \
@@ -216,6 +229,63 @@ insert_after("main/assets/assets.h",
 insert_after("main/assets/assets.h",
              "LV_IMG_DECLARE(logo_codex);",
              "LV_IMG_DECLARE(logo_opencode);")
+
+# The built-in badge configuration portal temporarily owns global Wi-Fi in AP
+# mode. Cooperate with hub_wifi and accept an already initialized driver.
+insert_after("main/hal/utils/config_ap/config_ap.cpp",
+             '#include "config_ap.h"',
+             '#include <services/hub_wifi/hub_wifi.h>')
+
+config_ap = root / "main/hal/utils/config_ap/config_ap.cpp"
+config_text = config_ap.read_text()
+wifi_init_old = (
+    'if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {\n'
+    '        ESP_LOGE(_tag, "wifi init failed: %s", esp_err_to_name(ret));'
+)
+wifi_init_new = (
+    'if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE && '\
+    'ret != ESP_ERR_WIFI_INIT_STATE) {\n'
+    '        ESP_LOGE(_tag, "wifi init failed: %s", esp_err_to_name(ret));'
+)
+if wifi_init_old in config_text:
+    config_text = config_text.replace(wifi_init_old, wifi_init_new, 1)
+elif wifi_init_new not in config_text:
+    raise SystemExit("Wi-Fi init guard anchor not found in config_ap.cpp")
+
+ap_start_old = (
+    '    bool start_access_point()\n'
+    '    {\n'
+    '        static esp_netif_t* ap_netif = nullptr;'
+)
+ap_start_new = (
+    '    bool start_access_point()\n'
+    '    {\n'
+    '        hub_wifi::suspend_for_exclusive_use();\n'
+    '        static esp_netif_t* ap_netif = nullptr;'
+)
+if ap_start_old in config_text:
+    config_text = config_text.replace(ap_start_old, ap_start_new, 1)
+elif ap_start_new not in config_text:
+    raise SystemExit("AP start anchor not found in config_ap.cpp")
+
+ap_stop_old = (
+    '        if (ret != ESP_OK && ret != ESP_ERR_WIFI_NOT_STARTED && ret != ESP_ERR_WIFI_MODE) {\n'
+    '            ESP_LOGW(_tag, "wifi stop failed: %s", esp_err_to_name(ret));\n'
+    '        }\n\n'
+    '        if (_event_group != nullptr) {'
+)
+ap_stop_new = (
+    '        if (ret != ESP_OK && ret != ESP_ERR_WIFI_NOT_STARTED && ret != ESP_ERR_WIFI_MODE) {\n'
+    '            ESP_LOGW(_tag, "wifi stop failed: %s", esp_err_to_name(ret));\n'
+    '        }\n'
+    '        hub_wifi::resume_after_exclusive_use();\n\n'
+    '        if (_event_group != nullptr) {'
+)
+if ap_stop_old in config_text:
+    config_text = config_text.replace(ap_stop_old, ap_stop_new, 1)
+elif ap_stop_new not in config_text:
+    raise SystemExit("AP stop anchor not found in config_ap.cpp")
+config_ap.write_text(config_text)
 
 # sdkconfig.defaults: enable NimBLE (BLE transport) + Wi-Fi (polling transport)
 sdk = root / "sdkconfig.defaults"

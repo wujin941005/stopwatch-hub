@@ -12,6 +12,10 @@ namespace net {
 // — safe to call on every app open.
 void start(const Config& cfg);
 
+// Pause bridge polling while the app is closed. The shared hub Wi-Fi station
+// stays available for other apps.
+void suspend();
+
 // If a complete '\n'-terminated line has arrived since the last call, copy it
 // (without the newline) into `out` and return true. Otherwise return false.
 bool poll_line(char* out, int out_size);
