@@ -1,0 +1,3 @@
+[submodule "vendor/PrintSphere"]
+	path = vendor/PrintSphere
+	url = https://github.com/cptkirki/PrintSphere.git

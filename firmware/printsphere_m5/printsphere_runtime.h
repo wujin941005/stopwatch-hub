@@ -5,14 +5,17 @@
  */
 #pragma once
 
-#include <cstdint>
+#include <memory>
 
-#include "printsphere/printer_state.hpp"
+namespace printsphere {
+class Application;
+}
 
 namespace printsphere_m5 {
 
-// StopWatch-facing lifecycle adapter for the hardware-independent core.
-// Networking is deliberately absent until the hub has one shared Wi-Fi owner.
+// StopWatch-facing owner for the complete PrintSphere application. The
+// upstream workers remain alive at low rate across app switches; the full LVGL
+// dashboard and camera/preview work are gated by Mooncake open/close events.
 class PrintSphereRuntime {
 public:
     static PrintSphereRuntime& instance();
@@ -20,18 +23,17 @@ public:
     void initialize();
     void resume();
     void suspend();
-    void update(uint32_t now_ms);
+    void update();
 
     bool active() const { return active_; }
-    printsphere::PrinterSnapshot snapshot() const;
 
 private:
     PrintSphereRuntime() = default;
+    ~PrintSphereRuntime();
 
-    printsphere::PrinterStateStore state_;
+    std::unique_ptr<printsphere::Application> application_;
     bool initialized_ = false;
     bool active_ = false;
-    uint32_t last_update_ms_ = 0;
 };
 
 }  // namespace printsphere_m5

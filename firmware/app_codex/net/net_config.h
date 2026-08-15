@@ -14,8 +14,6 @@ namespace net {
 // machine running `bridge/codexisland_bridge.py --serve` — on WSL use the
 // Windows host IP (or the mirrored-networking address), not the WSL IP.
 struct Config {
-    const char* ssid;
-    const char* password;
     const char* host;    // HTTP server host (IP or hostname)
     uint16_t    port;    // bridge --serve port
     const char* path;    // watch payload endpoint
@@ -24,8 +22,6 @@ struct Config {
 
 // Defaults — replace with your own values.
 inline const Config kConfig = {
-    .ssid    = "YOUR_WIFI_SSID",
-    .password = "YOUR_WIFI_PASSWORD",
     .host    = "192.168.1.100",
     .port    = 8080,
     .path    = "/stats",

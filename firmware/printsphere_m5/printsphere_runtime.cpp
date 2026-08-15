@@ -5,9 +5,14 @@
  */
 #include "printsphere_runtime.h"
 
-#include <utility>
+#include <esp_log.h>
+#include <printsphere/application.hpp>
 
 namespace printsphere_m5 {
+
+namespace {
+constexpr char kTag[] = "printsphere.m5";
+}
 
 PrintSphereRuntime& PrintSphereRuntime::instance()
 {
@@ -15,42 +20,39 @@ PrintSphereRuntime& PrintSphereRuntime::instance()
     return runtime;
 }
 
+PrintSphereRuntime::~PrintSphereRuntime() = default;
+
 void PrintSphereRuntime::initialize()
 {
     if (initialized_) return;
+    application_ = std::make_unique<printsphere::Application>();
+    const esp_err_t result = application_->start();
+    if (result != ESP_OK) {
+        ESP_LOGE(kTag, "Failed to start PrintSphere: %s", esp_err_to_name(result));
+        application_.reset();
+        return;
+    }
     initialized_ = true;
-
-    printsphere::PrinterSnapshot snapshot;
-    snapshot.connection = printsphere::PrinterConnectionState::kWaitingForCredentials;
-    snapshot.lifecycle = printsphere::PrintLifecycleState::kIdle;
-    snapshot.stage = "setup";
-    snapshot.detail = "Bambu setup required";
-    snapshot.ui_status = "Setup required";
-    state_.set_snapshot(std::move(snapshot));
 }
 
 void PrintSphereRuntime::resume()
 {
     initialize();
+    if (!application_) return;
     active_ = true;
+    application_->resume();
 }
 
 void PrintSphereRuntime::suspend()
 {
-    // The core snapshot survives app switches. Future camera/preview workers
-    // must pause here, while a low-rate status worker may remain connected.
     active_ = false;
+    if (application_) application_->suspend();
 }
 
-void PrintSphereRuntime::update(uint32_t now_ms)
+void PrintSphereRuntime::update()
 {
-    if (!active_) return;
-    last_update_ms_ = now_ms;
-}
-
-printsphere::PrinterSnapshot PrintSphereRuntime::snapshot() const
-{
-    return state_.snapshot();
+    // PrintSphere owns its network/state worker task. Mooncake's running hook
+    // only handles app-level input and intentionally stays non-blocking.
 }
 
 }  // namespace printsphere_m5

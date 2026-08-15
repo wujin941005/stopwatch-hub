@@ -123,8 +123,7 @@ int http_get(const char* host, uint16_t port, const char* path, char* buf, int b
 
 void poll_task(void*)
 {
-    mclog::tagInfo(TAG, "connecting to '{}' → http://{}:{}{}", g_cfg.ssid, g_cfg.host,
-                   g_cfg.port, g_cfg.path);
+    mclog::tagInfo(TAG, "polling http://{}:{}{}", g_cfg.host, g_cfg.port, g_cfg.path);
 
     for (;;) {
         if (!g_active.load()) {
@@ -167,7 +166,7 @@ void start(const Config& cfg)
 
     g_active.store(true);
     g_wake.store(true);
-    hub_wifi::start({cfg.ssid, cfg.password});
+    hub_wifi::start();
 }
 
 void suspend()

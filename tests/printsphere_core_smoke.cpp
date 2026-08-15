@@ -35,5 +35,6 @@ int main()
     assert(actual.job_name == "core-smoke-test");
     assert(actual.progress_percent == 42.5f);
     assert(std::string(to_string(actual.lifecycle)) == "printing");
+
     return 0;
 }

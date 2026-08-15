@@ -41,14 +41,13 @@ else
   ( cd "$TARGET" && python3 ./fetch_repos.py )
 fi
 
-# 3. Drop in both apps, the PrintSphere core/platform boundary, and assets.
+# 3. Drop in both apps, the complete pinned PrintSphere source/adapter layer,
+#    shared services, and launcher assets.
 echo "==> Copying StopWatch Hub apps, services, platform adapters, and assets..."
 mkdir -p "$TARGET/main/apps/app_codex/ble" \
          "$TARGET/main/apps/app_codex/net" \
          "$TARGET/main/apps/app_codex/debug" \
-         "$TARGET/main/apps/app_bambu_status" \
-         "$TARGET/main/services/printsphere_core/include/printsphere" \
-         "$TARGET/main/services/printsphere_core/src" \
+         "$TARGET/main/apps/app_printsphere" \
          "$TARGET/main/services/hub_wifi" \
          "$TARGET/main/platform/printsphere_m5" \
          "$TARGET/main/assets/images"
@@ -66,30 +65,33 @@ cp "$REPO_ROOT"/firmware/assets/logo_claude.c           "$TARGET/main/assets/ima
 cp "$REPO_ROOT"/firmware/assets/logo_codex.c            "$TARGET/main/assets/images/"
 cp "$REPO_ROOT"/firmware/assets/logo_opencode.c         "$TARGET/main/assets/images/"
 cp "$REPO_ROOT"/firmware/assets/icon_cc_island.c        "$TARGET/main/assets/images/"
-cp "$REPO_ROOT"/firmware/app_bambu_status/app_bambu_status.h \
-   "$TARGET/main/apps/app_bambu_status/"
-cp "$REPO_ROOT"/firmware/app_bambu_status/app_bambu_status.cpp \
-   "$TARGET/main/apps/app_bambu_status/"
-cp "$REPO_ROOT"/firmware/printsphere_core/include/printsphere/printer_state.hpp \
-   "$TARGET/main/services/printsphere_core/include/printsphere/"
-cp "$REPO_ROOT"/firmware/printsphere_core/include/printsphere/bambu_status.hpp \
-   "$TARGET/main/services/printsphere_core/include/printsphere/"
-cp "$REPO_ROOT"/firmware/printsphere_core/src/printer_state.cpp \
-   "$TARGET/main/services/printsphere_core/src/"
-cp "$REPO_ROOT"/firmware/printsphere_core/src/bambu_status.cpp \
-   "$TARGET/main/services/printsphere_core/src/"
+cp "$REPO_ROOT"/firmware/app_printsphere/app_printsphere.h \
+   "$TARGET/main/apps/app_printsphere/"
+cp "$REPO_ROOT"/firmware/app_printsphere/app_printsphere.cpp \
+   "$TARGET/main/apps/app_printsphere/"
 cp "$REPO_ROOT"/firmware/hub_wifi/hub_wifi.h \
    "$TARGET/main/services/hub_wifi/"
 cp "$REPO_ROOT"/firmware/hub_wifi/hub_wifi.cpp \
+   "$TARGET/main/services/hub_wifi/"
+cp "$REPO_ROOT"/firmware/hub_wifi/hub_wifi_config.h \
    "$TARGET/main/services/hub_wifi/"
 cp "$REPO_ROOT"/firmware/printsphere_m5/printsphere_runtime.h \
    "$TARGET/main/platform/printsphere_m5/"
 cp "$REPO_ROOT"/firmware/printsphere_m5/printsphere_runtime.cpp \
    "$TARGET/main/platform/printsphere_m5/"
-cp "$REPO_ROOT"/firmware/assets/icon_bambu_status.c     "$TARGET/main/assets/images/"
+cp "$REPO_ROOT"/firmware/assets/icon_printsphere.c      "$TARGET/main/assets/images/"
 cp "$REPO_ROOT"/firmware/partitions.csv                 "$TARGET/partitions.csv"
-# Remove the pre-CC-Island launcher asset when upgrading an existing checkout.
-rm -f "$TARGET/main/assets/images/icon_codex.c"
+python3 "$REPO_ROOT/scripts/prepare_printsphere_port.py" "$REPO_ROOT" "$TARGET"
+# Remove files from the pre-hub launcher and the earlier PrintSphere scaffold
+# when upgrading an existing generated checkout.
+rm -f "$TARGET/main/assets/images/icon_codex.c" \
+      "$TARGET/main/assets/images/icon_bambu_status.c" \
+      "$TARGET/main/apps/app_bambu_status/app_bambu_status.h" \
+      "$TARGET/main/apps/app_bambu_status/app_bambu_status.cpp" \
+      "$TARGET/main/services/printsphere_core/include/printsphere/printer_state.hpp" \
+      "$TARGET/main/services/printsphere_core/include/printsphere/bambu_status.hpp" \
+      "$TARGET/main/services/printsphere_core/src/printer_state.cpp" \
+      "$TARGET/main/services/printsphere_core/src/bambu_status.cpp"
 
 # 3b. Bake WiFi + bridge settings from the gitignored .env (if present) into
 #     the copied net_config.h. Without .env, the committed placeholders stay.
@@ -110,14 +112,18 @@ if env_path.exists():
 def cstr(s):
     return s.replace("\\", "\\\\").replace('"', '\\"')
 
+hub_cfg = root / "firmware/hub_wifi/hub_wifi_config.h"
+hub_text = hub_cfg.read_text()
+if "CC_WIFI_SSID" in env and env.get("CC_WIFI_SSID"):
+    hub_text = re.sub(r'\.ssid\s*=\s*"[^"]*"',
+                      f'.ssid = "{cstr(env["CC_WIFI_SSID"])}"', hub_text)
+if "CC_WIFI_PASSWORD" in env and env.get("CC_WIFI_PASSWORD"):
+    hub_text = re.sub(r'\.password\s*=\s*"[^"]*"',
+                      f'.password = "{cstr(env["CC_WIFI_PASSWORD"])}"', hub_text)
+(target / "main/services/hub_wifi/hub_wifi_config.h").write_text(hub_text)
+
 cfg = root / "firmware/app_codex/net/net_config.h"
 text = cfg.read_text()
-if "CC_WIFI_SSID" in env and env.get("CC_WIFI_SSID"):
-    text = re.sub(r'\.ssid\s*=\s*"[^"]*"',
-                  f'.ssid    = "{cstr(env["CC_WIFI_SSID"])}"', text)
-if "CC_WIFI_PASSWORD" in env and env.get("CC_WIFI_PASSWORD"):
-    text = re.sub(r'\.password\s*=\s*"[^"]*"',
-                  f'.password = "{cstr(env["CC_WIFI_PASSWORD"])}"', text)
 if "CC_BRIDGE_HOST" in env and env.get("CC_BRIDGE_HOST"):
     text = re.sub(r'\.host\s*=\s*"[^"]*"',
                   f'.host    = "{cstr(env["CC_BRIDGE_HOST"])}"', text)
@@ -153,8 +159,8 @@ if "CC_AUTO_SWITCH_MS" in env and env.get("CC_AUTO_SWITCH_MS") is not None:
     text2 = re.sub(r'kAutoSwitchMs\s*=\s*\d+',
                    f'kAutoSwitchMs = {env["CC_AUTO_SWITCH_MS"]}', text2)
 (target / "main/apps/app_codex/app_codex_config.h").write_text(text2)
-print("   net_config.h updated from .env" if "CC_WIFI_SSID" in env else
-      "   no .env — keeping placeholder net_config.h")
+print("   shared Wi-Fi and app configs updated from .env" if "CC_WIFI_SSID" in env else
+      "   no Wi-Fi .env config — keeping setup-required defaults")
 PY
 
 # 4. Apply the small, idempotent edits to the factory sources.
@@ -179,13 +185,26 @@ def insert_after(path, anchor, line):
     p.write_text("\n".join(out) + "\n")
     print(f"   patched {path}")
 
+def remove_line(path, line):
+    p = root / path
+    text = p.read_text()
+    updated = "\n".join(item for item in text.splitlines() if item.strip() != line.strip()) + "\n"
+    if updated != text:
+        p.write_text(updated)
+        print(f"   removed legacy entry from {path}")
+
+# Upgrade generated checkouts from the earlier Bambu Status scaffold.
+remove_line("main/apps/apps.h", '#include "app_bambu_status/app_bambu_status.h"')
+remove_line("main/main.cpp",
+            "    GetMooncake().installApp(std::make_unique<AppBambuStatus>());")
+
 # apps.h: include the app header
 insert_after("main/apps/apps.h",
              '#include "app_template/app_template.h"',
              '#include "app_codex/app_codex.h"')
 insert_after("main/apps/apps.h",
              '#include "app_codex/app_codex.h"',
-             '#include "app_bambu_status/app_bambu_status.h"')
+             '#include "app_printsphere/app_printsphere.h"')
 
 # main.cpp: install the app
 insert_after("main/main.cpp",
@@ -193,7 +212,7 @@ insert_after("main/main.cpp",
              "    GetMooncake().installApp(std::make_unique<AppCodex>());")
 insert_after("main/main.cpp",
              "GetMooncake().installApp(std::make_unique<AppCodex>());",
-             "    GetMooncake().installApp(std::make_unique<AppBambuStatus>());")
+             "    GetMooncake().installApp(std::make_unique<AppPrintSphere>());")
 
 # main CMakeLists: compile service/platform sources and expose core headers.
 insert_after("main/CMakeLists.txt",
@@ -206,12 +225,49 @@ insert_after("main/CMakeLists.txt",
              '    "platform/*.cpp"')
 insert_after("main/CMakeLists.txt",
              '    "."',
-             '    "services/printsphere_core/include"')
+             '    "services/printsphere/include"')
+
+cmake = root / "main/CMakeLists.txt"
+cmake_text = cmake.read_text().replace('    "services/printsphere_core/include"\n', "")
+embed_anchor = '        "hal/utils/config_ap/assets/badge_config_ap.html"'
+embed_lines = (
+    '        "services/printsphere/include/certs/bambu.cert"\n'
+    '        "services/printsphere/include/certs/bambu_p2s_250626.cert"\n'
+    '        "services/printsphere/include/certs/bambu_h2c_251122.cert"\n'
+    '        "services/printsphere/include/certs/bambu_x2c_260425.cert"\n'
+    '        "services/printsphere/include/error_lookup/error_lookup.tsv"'
+)
+if embed_lines not in cmake_text:
+    if embed_anchor not in cmake_text:
+        raise SystemExit("EMBED_TXTFILES anchor not found in main/CMakeLists.txt")
+    cmake_text = cmake_text.replace(embed_anchor, embed_anchor + "\n" + embed_lines, 1)
+
+define_lines = (
+    '\ntarget_compile_definitions(${COMPONENT_LIB} PRIVATE\n'
+    '    PRINTSPHERE_RELEASE_VERSION="v1.6.2"\n'
+    '    PRINTSPHERE_HW_VARIANT_AMOLED_1_75=1\n'
+    ')\n'
+)
+if "PRINTSPHERE_RELEASE_VERSION" not in cmake_text:
+    cmake_text = cmake_text.rstrip() + define_lines
+cmake.write_text(cmake_text)
+
+manifest = root / "main/idf_component.yml"
+manifest_text = manifest.read_text()
+dependencies = (
+    "  espressif/cjson: ^1.7.19\n"
+    "  espressif/mqtt: ^1.0.0\n"
+    "  espressif/esp_new_jpeg: '*'\n"
+    "  espressif/libpng: '*'\n"
+)
+if "espressif/esp_new_jpeg:" not in manifest_text:
+    manifest.write_text(manifest_text.rstrip() + "\n" + dependencies)
 
 # assets.h: declare the images
 assets_h = root / "main/assets/assets.h"
 assets_text = assets_h.read_text().replace(
     "LV_IMG_DECLARE(icon_codex);", "LV_IMG_DECLARE(icon_cc_island);")
+assets_text = assets_text.replace("LV_IMG_DECLARE(icon_bambu_status);\n", "")
 assets_h.write_text(assets_text)
 
 insert_after("main/assets/assets.h",
@@ -219,9 +275,9 @@ insert_after("main/assets/assets.h",
              "LV_IMG_DECLARE(icon_cc_island);")
 insert_after("main/assets/assets.h",
              "LV_IMG_DECLARE(icon_cc_island);",
-             "LV_IMG_DECLARE(icon_bambu_status);")
+             "LV_IMG_DECLARE(icon_printsphere);")
 insert_after("main/assets/assets.h",
-             "LV_IMG_DECLARE(icon_bambu_status);",
+             "LV_IMG_DECLARE(icon_printsphere);",
              "LV_IMG_DECLARE(logo_claude);")
 insert_after("main/assets/assets.h",
              "LV_IMG_DECLARE(logo_claude);",
@@ -267,6 +323,22 @@ if ap_start_old in config_text:
     config_text = config_text.replace(ap_start_old, ap_start_new, 1)
 elif ap_start_new not in config_text:
     raise SystemExit("AP start anchor not found in config_ap.cpp")
+
+netif_old = (
+    '        if (ap_netif == nullptr) {\n'
+    '            ap_netif = esp_netif_create_default_wifi_ap();'
+)
+netif_lookup = (
+    '        if (ap_netif == nullptr) {\n'
+    '            ap_netif = esp_netif_get_handle_from_ifkey("WIFI_AP_DEF");\n'
+    '        }\n'
+)
+while netif_lookup + netif_lookup in config_text:
+    config_text = config_text.replace(netif_lookup + netif_lookup, netif_lookup, 1)
+if netif_lookup not in config_text and netif_old in config_text:
+    config_text = config_text.replace(netif_old, netif_lookup + netif_old, 1)
+elif netif_lookup not in config_text:
+    raise SystemExit("shared AP netif anchor not found in config_ap.cpp")
 
 ap_stop_old = (
     '        if (ret != ESP_OK && ret != ESP_ERR_WIFI_NOT_STARTED && ret != ESP_ERR_WIFI_MODE) {\n'

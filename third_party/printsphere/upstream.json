@@ -5,11 +5,12 @@
   "commit": "ed071d11dd09c2c93abdba62d8458e4b592f79d0",
   "license": "LicenseRef-FNCL-1.1",
   "imported_at": "2026-08-15",
-  "strategy": "vendored-selected-sources",
+  "strategy": "git-submodule-full-source-with-generated-m5-adapters",
   "modifications": [
-    "Split hardware-independent state and status parsing into printsphere_core",
-    "Replace the standalone application loop with Mooncake lifecycle callbacks",
-    "Use the M5Stack factory HAL as the sole display, touch, PMU, audio, and LVGL owner",
-    "Do not include PrintSphere standalone OTA or serial provisioning"
+    "Keep the upstream submodule unchanged and materialize its complete main/include and main/src trees",
+    "Expose the application through Mooncake lifecycle callbacks and a private LVGL root",
+    "Use the M5Stack factory HAL as the sole display, touch, PMU, audio, I2C, storage, and LVGL owner",
+    "Route both apps through one hub_wifi owner with shared STA, fallback AP, scan, and Badge AP handoff",
+    "Keep Web Config, USB provisioning, camera, audio, and OTA while restricting OTA to combined StopWatch images"
   ]
 }
