@@ -31,12 +31,20 @@ static constexpr uint32_t kCpuColor      = 0x22D3EE;  // cyan
 static constexpr uint32_t kMemColor      = 0xA78BFA;  // violet
 static constexpr uint32_t kDiskColor     = 0x4ADE80;  // green
 static constexpr uint32_t kNetColor      = 0xFBBF24;  // amber
+static constexpr uint32_t kBatteryColor  = 0xD1D5DB;  // neutral light gray
+static constexpr uint32_t kChargeColor   = 0x22C55E;  // green
+static constexpr uint32_t kBatteryLow    = 0xF59E0B;  // amber
+static constexpr uint32_t kBatteryCrit   = 0xEF4444;  // red
 
 // 5h-window utilization that triggers a haptic alert when first crossed.
 static constexpr int kAlertThreshold = 80;
 
 // Horizontal swipe distance (px) required to switch pages manually.
 static constexpr int kGestureMinDistance = 60;
+
+// Charging status performs PMIC I2C reads. Keep it far outside the Mooncake
+// frame cadence while still making cable and battery changes feel responsive.
+static constexpr uint32_t kBatteryRefreshMs = 5000;
 
 namespace {
 
@@ -86,6 +94,12 @@ std::int64_t jint64(cJSON* obj, const char* key)
 {
     cJSON* it = cJSON_GetObjectItemCaseSensitive(obj, key);
     return it ? static_cast<std::int64_t>(it->valuedouble) : 0;
+}
+
+bool has_error(cJSON* obj)
+{
+    return cJSON_IsObject(obj) &&
+           cJSON_GetObjectItemCaseSensitive(obj, "error") != nullptr;
 }
 
 // --------------------------------------------------------------------------- //
@@ -240,6 +254,9 @@ lv_obj_t* s_page_sys      = nullptr;
 int s_page                = 0;
 bool s_auto_switch        = true;
 lv_obj_t* s_mode_lbl      = nullptr;
+lv_obj_t* s_battery_icon_lbl = nullptr;
+lv_obj_t* s_battery_lbl   = nullptr;
+uint32_t s_last_battery_ms = 0;
 
 // Codex page (pages layout)
 WinRow s_cx_5h;
@@ -314,6 +331,45 @@ void update_mode_label()
     lv_label_set_text(s_mode_lbl, s_auto_switch ? "AUTO" : "MAN");
     lv_obj_set_style_text_color(s_mode_lbl,
                                 lv_color_hex(s_auto_switch ? 0x22C55E : kDetailColor), 0);
+}
+
+const char* battery_symbol(uint8_t level)
+{
+    if (level >= 90) return LV_SYMBOL_BATTERY_FULL;
+    if (level >= 65) return LV_SYMBOL_BATTERY_3;
+    if (level >= 40) return LV_SYMBOL_BATTERY_2;
+    if (level >= 15) return LV_SYMBOL_BATTERY_1;
+    return LV_SYMBOL_BATTERY_EMPTY;
+}
+
+void update_battery_label()
+{
+    if (!s_battery_icon_lbl || !s_battery_lbl) return;
+
+    const uint32_t now = GetHAL().millis();
+    if (s_last_battery_ms != 0 && now - s_last_battery_ms < kBatteryRefreshMs) return;
+    s_last_battery_ms = now;
+
+    const uint8_t level = GetHAL().getBatteryLevel();
+    const bool charging = GetHAL().isBatteryCharging(false);
+    char text[8];
+    std::snprintf(text, sizeof(text), "%u%%%s", static_cast<unsigned>(level),
+                  charging ? "+" : "");
+
+    uint32_t color = kBatteryColor;
+    if (charging)
+        color = kChargeColor;
+    else if (level <= 15)
+        color = kBatteryCrit;
+    else if (level <= 30)
+        color = kBatteryLow;
+
+    LvglLockGuard lock;
+    if (!s_battery_icon_lbl || !s_battery_lbl) return;
+    lv_label_set_text(s_battery_icon_lbl, battery_symbol(level));
+    lv_obj_set_style_text_color(s_battery_icon_lbl, lv_color_hex(color), 0);
+    lv_label_set_text(s_battery_lbl, text);
+    lv_obj_set_style_text_color(s_battery_lbl, lv_color_hex(color), 0);
 }
 
 // --------------------------------------------------------------------------- //
@@ -558,7 +614,7 @@ bool update_claude_row(cJSON* root)
     if (kLayoutPages) return false;
     cJSON* obj = cJSON_GetObjectItem(root, "c");
     UsageRow* row = row_for_provider("c");
-    if (!cJSON_IsObject(obj) || !row) return false;
+    if (!cJSON_IsObject(obj) || has_error(obj) || !row) return false;
 
     int h = jint(obj, "h");
     {
@@ -576,7 +632,8 @@ bool update_claude_row(cJSON* root)
 bool update_codex_page(cJSON* root)
 {
     cJSON* obj = cJSON_GetObjectItem(root, "x");
-    if (!cJSON_IsObject(obj)) return false;
+    cJSON* h_item = cJSON_GetObjectItemCaseSensitive(obj, "h");
+    if (!cJSON_IsObject(obj) || has_error(obj) || !cJSON_IsNumber(h_item)) return false;
     int h = jint(obj, "h"), hr = jint(obj, "hr"), hw = jint(obj, "hw");
     int w = jint(obj, "w"), wr = jint(obj, "wr"), ww = jint(obj, "ww");
     double cost = jdbl(obj, "$");
@@ -617,7 +674,7 @@ bool update_codex_page(cJSON* root)
 bool update_opencode_page(cJSON* root)
 {
     cJSON* obj = cJSON_GetObjectItem(root, "o");
-    if (!cJSON_IsObject(obj)) return false;
+    if (!cJSON_IsObject(obj) || has_error(obj)) return false;
     double today = jdbl(obj, "t");
     std::int64_t tokens = jint64(obj, "T");
     bool has_quota = cJSON_GetObjectItem(obj, "h") != nullptr;
@@ -697,6 +754,12 @@ void handle_line(const char* line)
     cJSON* root = cJSON_Parse(line);
     if (!root) return;
 
+    cJSON* codex = cJSON_GetObjectItemCaseSensitive(root, "x");
+    cJSON* codex_h = cJSON_GetObjectItemCaseSensitive(codex, "h");
+    if (cJSON_IsObject(codex) && !has_error(codex) && cJSON_IsNumber(codex_h)) {
+        net::remember_line(line);
+    }
+
     bool alert = false;
     alert |= update_claude_row(root);
     alert |= update_codex_page(root);
@@ -755,6 +818,12 @@ AppCodex::AppCodex()
 void AppCodex::onCreate()
 {
     mclog::tagInfo(getAppInfo().name, "on create");
+
+    // NimBLE needs controller/DMA-capable internal RAM. Reserve it while the
+    // launcher is still booting, before PrintSphere starts its process-lifetime
+    // Wi-Fi, Web Config, cloud and MQTT services. BLE itself remains available
+    // while either launcher App is foregrounded.
+    ble_nus::start("CC Island");
 }
 
 void AppCodex::onOpen()
@@ -763,6 +832,7 @@ void AppCodex::onOpen()
 
     _key_manager = std::make_unique<input::KeyManager>();
 
+    // Idempotent retry in case the boot-time initialization could not complete.
     ble_nus::start("CC Island");
     net::start(net::kConfig);
     debug_shot::start();
@@ -778,10 +848,23 @@ void AppCodex::onOpen()
     lv_obj_set_style_pad_all(s_root, 0, 0);
     lv_obj_remove_flag(s_root, LV_OBJ_FLAG_SCROLLABLE);
 
-    // Mode indicator (bottom center — top corners are off the round screen)
+    // Compact footer. Keeping both labels close to the center avoids the
+    // clipped bottom corners of the round display.
     s_mode_lbl = lv_label_create(s_root);
     lv_obj_set_style_text_font(s_mode_lbl, &lv_font_maple_mono_medium_24, 0);
-    lv_obj_align(s_mode_lbl, LV_ALIGN_BOTTOM_MID, 0, -10);
+    lv_obj_align(s_mode_lbl, LV_ALIGN_BOTTOM_MID, -55, -10);
+
+    s_battery_icon_lbl = lv_label_create(s_root);
+    lv_label_set_text(s_battery_icon_lbl, LV_SYMBOL_BATTERY_EMPTY);
+    lv_obj_set_style_text_font(s_battery_icon_lbl, &lv_font_montserrat_24, 0);
+    lv_obj_set_style_text_color(s_battery_icon_lbl, lv_color_hex(kBatteryColor), 0);
+    lv_obj_align(s_battery_icon_lbl, LV_ALIGN_BOTTOM_MID, 10, -10);
+
+    s_battery_lbl = lv_label_create(s_root);
+    lv_label_set_text(s_battery_lbl, "--%");
+    lv_obj_set_style_text_font(s_battery_lbl, &lv_font_maple_mono_medium_24, 0);
+    lv_obj_set_style_text_color(s_battery_lbl, lv_color_hex(kBatteryColor), 0);
+    lv_obj_align(s_battery_lbl, LV_ALIGN_BOTTOM_MID, 60, -10);
 
     if (kLayoutPages) {
         // ---- Codex page ----
@@ -858,11 +941,14 @@ void AppCodex::onOpen()
 
     show_page(0);
     s_gesture_pressing = false;
+    s_last_battery_ms = 0;
     s_last_switch_ms = GetHAL().millis();
 }
 
 void AppCodex::onRunning()
 {
+    update_battery_label();
+
     if (_key_manager) {
         input::KeyEvent ev = _key_manager->update();
         if (ev == input::KeyEvent::GoHome) {
@@ -925,6 +1011,9 @@ void AppCodex::onClose()
     s_page_opencode = nullptr;
     s_page_sys = nullptr;
     s_mode_lbl = nullptr;
+    s_battery_icon_lbl = nullptr;
+    s_battery_lbl = nullptr;
+    s_last_battery_ms = 0;
     s_cx_5h = WinRow{};
     s_cx_7d = WinRow{};
     s_cx_cost = nullptr;

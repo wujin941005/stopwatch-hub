@@ -12,9 +12,10 @@
 #include "ble_nus.h"
 
 #include <cstring>
+#include <esp_err.h>
+#include <esp_heap_caps.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
-#include <nvs_flash.h>
 #include <mooncake_log.h>
 
 #include "nimble/nimble_port.h"
@@ -55,7 +56,7 @@ uint16_t g_conn_handle = BLE_HS_CONN_HANDLE_NONE;
 uint8_t g_addr_type = 0;
 const char* g_name = "CC Island";
 
-void start_advertising();
+bool start_advertising();
 
 // Push a finished line to the shared slot under the mutex.
 void publish_line(const char* line, int len)
@@ -149,7 +150,7 @@ int gap_event(struct ble_gap_event* event, void*)
     return 0;
 }
 
-void start_advertising()
+bool start_advertising()
 {
     struct ble_gap_adv_params adv_params = {};
     adv_params.conn_mode = BLE_GAP_CONN_MODE_UND;
@@ -163,7 +164,7 @@ void start_advertising()
     int rc = ble_gap_adv_set_fields(&fields);
     if (rc != 0) {
         mclog::tagError(TAG, "ble_gap_adv_set_fields failed: {}", rc);
-        return;
+        return false;
     }
 
     // Legacy advertising packets are limited to 31 bytes. Flags + complete
@@ -176,20 +177,28 @@ void start_advertising()
     rc = ble_gap_adv_rsp_set_fields(&response);
     if (rc != 0) {
         mclog::tagError(TAG, "ble_gap_adv_rsp_set_fields failed: {}", rc);
-        return;
+        return false;
     }
 
     rc = ble_gap_adv_start(g_addr_type, nullptr, BLE_HS_FOREVER, &adv_params,
                            gap_event, nullptr);
-    if (rc != 0)
+    if (rc != 0) {
         mclog::tagError(TAG, "ble_gap_adv_start failed: {}", rc);
+        return false;
+    }
+
+    mclog::tagInfo(TAG, "advertising as '{}'", g_name);
+    return true;
 }
 
 void on_sync()
 {
-    ble_hs_id_infer_auto(0, &g_addr_type);
+    const int rc = ble_hs_id_infer_auto(0, &g_addr_type);
+    if (rc != 0) {
+        mclog::tagError(TAG, "ble_hs_id_infer_auto failed: {}", rc);
+        return;
+    }
     start_advertising();
-    mclog::tagInfo(TAG, "advertising as '{}'", g_name);
 }
 
 void host_task(void*)
@@ -202,35 +211,61 @@ void host_task(void*)
 
 namespace ble_nus {
 
-void start(const char* device_name)
+bool start(const char* device_name)
 {
     static bool started = false;
-    if (started) return;
-    started = true;
+    if (started) return true;
 
     if (device_name && device_name[0]) g_name = device_name;
-    g_mtx = xSemaphoreCreateMutex();
-
-    esp_err_t err = nvs_flash_init();
-    if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        nvs_flash_erase();
-        nvs_flash_init();
+    if (g_mtx == nullptr) {
+        g_mtx = xSemaphoreCreateMutex();
+        if (g_mtx == nullptr) {
+            mclog::tagError(TAG, "RX mutex allocation failed: internal={} largest={}",
+                            heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                            heap_caps_get_largest_free_block(
+                                MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+            return false;
+        }
     }
 
-    if (nimble_port_init() != ESP_OK) {
-        mclog::tagError(TAG, "nimble_port_init failed");
-        return;
+    mclog::tagInfo(TAG, "initializing: internal={} largest={} psram={}",
+                   heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                   heap_caps_get_largest_free_block(
+                       MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+                   heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+    const esp_err_t init_err = nimble_port_init();
+    if (init_err != ESP_OK) {
+        mclog::tagError(TAG,
+                        "nimble_port_init failed: {} internal={} largest={} psram={}",
+                        esp_err_to_name(init_err),
+                        heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                        heap_caps_get_largest_free_block(
+                            MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+                        heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+        return false;
     }
 
     ble_svc_gap_init();
     ble_svc_gatt_init();
-    ble_gatts_count_cfg(kSvcs);
-    ble_gatts_add_svcs(kSvcs);
-    ble_svc_gap_device_name_set(g_name);
+    int rc = ble_gatts_count_cfg(kSvcs);
+    if (rc == 0) rc = ble_gatts_add_svcs(kSvcs);
+    if (rc == 0) rc = ble_svc_gap_device_name_set(g_name);
+    if (rc != 0) {
+        mclog::tagError(TAG, "NUS service setup failed: {}", rc);
+        nimble_port_deinit();
+        return false;
+    }
 
     ble_hs_cfg.sync_cb = on_sync;
 
     nimble_port_freertos_init(host_task);
+    started = true;
+    mclog::tagInfo(TAG, "started: internal={} largest={} psram={}",
+                   heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                   heap_caps_get_largest_free_block(
+                       MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+                   heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+    return true;
 }
 
 void request_refresh()

@@ -21,6 +21,7 @@
 #include <lwip/ip4_addr.h>
 #include <mooncake_log.h>
 #include <nvs_flash.h>
+#include <services/hub_time/hub_time.h>
 
 namespace {
 
@@ -137,7 +138,10 @@ void on_wifi_event(void*, esp_event_base_t base, int32_t id, void* data)
         set_ip(ip);
         g_disconnect_retries.store(0);
         g_connected.store(true);
-        if (g_setup_ap_requested.exchange(false)) wake_service();
+        g_setup_ap_requested.store(false);
+        // Run SNTP initialization from the Hub worker rather than the ESP-IDF
+        // event task. The notification also applies the AP shutdown.
+        wake_service();
         mclog::tagInfo(kTag, "station ready at {}", ip ? ip : "?");
     }
 }
@@ -324,8 +328,16 @@ void service_task(void*)
     g_stack_state.store(1);
     apply_wifi_state();
     for (;;) {
-        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-        apply_wifi_state();
+        const uint32_t notifications =
+            ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(30000));
+        if (notifications > 0) apply_wifi_state();
+        if (g_connected.load()) {
+            const esp_err_t time_result = hub_time::maintain_sntp();
+            if (time_result != ESP_OK) {
+                mclog::tagWarn(kTag, "network time maintenance failed: {}",
+                               esp_err_to_name(time_result));
+            }
+        }
     }
 }
 
@@ -522,6 +534,14 @@ bool configured()
 bool connected()
 {
     return g_connected.load();
+}
+
+bool copy_station_ssid(char* output, std::size_t output_size)
+{
+    if (!output || output_size == 0) return false;
+    const OwnedConfig config = config_snapshot(g_station_config);
+    std::snprintf(output, output_size, "%s", config.ssid);
+    return config.ssid[0] != '\0';
 }
 
 bool copy_ip(char* output, std::size_t output_size)

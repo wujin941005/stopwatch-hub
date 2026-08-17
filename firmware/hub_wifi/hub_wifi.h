@@ -46,6 +46,10 @@ std::vector<AccessPoint> scan_visible_access_points();
 
 bool configured();
 bool connected();
+// Copy the SSID currently selected by the shared station service. This exposes
+// only the network name so setup UIs can reflect the device-wide Wi-Fi without
+// ever reading or rendering the password.
+bool copy_station_ssid(char* output, std::size_t output_size);
 bool copy_ip(char* output, std::size_t output_size);
 
 // M5Stack's built-in configuration AP temporarily changes the global Wi-Fi

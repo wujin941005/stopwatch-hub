@@ -64,6 +64,69 @@ class ProviderTests(unittest.TestCase):
             self.assertEqual(saved["claudeAiOauth"], oauth)
             self.assertEqual(list(Path(tmpdir).glob("*.tmp")), [])
 
+    def test_provider_cache_keeps_last_good_value_on_transient_error(self):
+        previous_cache = bridge._DATA_CACHE
+        previous_last_good = bridge._LAST_GOOD_PROVIDERS
+        try:
+            bridge._DATA_CACHE = {}
+            bridge._LAST_GOOD_PROVIDERS = {}
+            good = {
+                "ts": 1,
+                "claude": {"error": "auth required", "cost_today": 0.0},
+                "codex": {
+                    "five_hour": {"pct": 42.0, "reset_at": 10_000},
+                    "weekly": {"pct": 17.0, "reset_at": 20_000},
+                    "cost_today": 1.25,
+                    "tokens_today": 100,
+                },
+                "opencode": {"t": 0.0, "T": 0, "s": 0, "d": 0.0},
+            }
+            bridge._store_provider_cache(good, now=100.0)
+
+            failed = dict(good)
+            failed["codex"] = {
+                "error": "network timeout",
+                "cost_today": 2.5,
+                "tokens_today": 200,
+            }
+            merged = bridge._store_provider_cache(failed, now=130.0)
+
+            self.assertEqual(merged["codex"]["five_hour"]["pct"], 42.0)
+            self.assertEqual(merged["codex"]["cost_today"], 2.5)
+            self.assertEqual(merged["codex"]["tokens_today"], 200)
+            self.assertTrue(merged["codex"]["cached"])
+            self.assertEqual(merged["codex"]["cache_age_s"], 30)
+            self.assertEqual(merged["codex"]["refresh_error"], "network timeout")
+            self.assertNotIn("error", merged["codex"])
+        finally:
+            bridge._DATA_CACHE = previous_cache
+            bridge._LAST_GOOD_PROVIDERS = previous_last_good
+
+    def test_provider_cache_expires_old_last_good_value(self):
+        previous_cache = bridge._DATA_CACHE
+        previous_last_good = bridge._LAST_GOOD_PROVIDERS
+        try:
+            bridge._DATA_CACHE = {}
+            bridge._LAST_GOOD_PROVIDERS = {
+                "codex": ({"five_hour": {"pct": 42.0}}, 100.0),
+            }
+            failed = {
+                "ts": 2,
+                "claude": {"error": "auth required"},
+                "codex": {"error": "network timeout"},
+                "opencode": {"error": "db unavailable"},
+            }
+
+            merged = bridge._store_provider_cache(
+                failed,
+                now=100.0 + bridge.MAX_STALE_PROVIDER_S + 1,
+            )
+
+            self.assertEqual(merged["codex"], {"error": "network timeout"})
+        finally:
+            bridge._DATA_CACHE = previous_cache
+            bridge._LAST_GOOD_PROVIDERS = previous_last_good
+
 
 class PlatformPathTests(unittest.TestCase):
     def test_windows_paths_are_translated_when_bridge_runs_in_wsl(self):

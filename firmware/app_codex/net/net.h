@@ -20,6 +20,11 @@ void suspend();
 // (without the newline) into `out` and return true. Otherwise return false.
 bool poll_line(char* out, int out_size);
 
+// Remember the latest complete, displayable payload. The cache is replayed on
+// the next app open and periodically persisted so a bridge/Wi-Fi outage does
+// not replace the last reading with an empty page after a watch restart.
+void remember_line(const char* line);
+
 // Ask the polling task to fetch a fresh reading now (blue button).
 void request_refresh();
 

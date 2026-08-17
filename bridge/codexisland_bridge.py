@@ -1651,10 +1651,14 @@ def _cached_opencode_go(config):
 # Combine + render
 # --------------------------------------------------------------------------- #
 _DATA_CACHE = {}
+_DATA_CACHE_LOCK = threading.Lock()
+_LAST_GOOD_PROVIDERS = {}
 _DATA_REFRESH_TTL = 30
 _DATA_REFRESHER_STARTED = False
 _opencode_db_arg = None
 _opencode_go_arg = None
+MAX_STALE_PROVIDER_S = 6 * 60 * 60
+_PROVIDER_NAMES = ("claude", "codex", "opencode")
 
 
 def _collect_providers(opencode_db, opencode_go):
@@ -1678,12 +1682,54 @@ def _collect_providers(opencode_db, opencode_go):
     }
 
 
-def _data_refresher():
+def _store_provider_cache(fresh, now=None):
+    """Publish a refresh without replacing good data with transient errors.
+
+    Provider endpoints fail independently, so one temporary auth/network/API
+    error must not blank a watch page that already has a recent good reading.
+    Local counters from the failed refresh are still copied onto the cached
+    provider value because those do not depend on the remote endpoint.
+    """
     global _DATA_CACHE
+    now = time.time() if now is None else now
+    merged = dict(fresh)
+
+    with _DATA_CACHE_LOCK:
+        for name in _PROVIDER_NAMES:
+            current = dict(fresh.get(name) or {})
+            if "error" not in current:
+                _LAST_GOOD_PROVIDERS[name] = (dict(current), now)
+                merged[name] = current
+                continue
+
+            saved = _LAST_GOOD_PROVIDERS.get(name)
+            if not saved or now - saved[1] > MAX_STALE_PROVIDER_S:
+                merged[name] = current
+                continue
+
+            restored = dict(saved[0])
+            restored.update({key: value for key, value in current.items()
+                             if key != "error"})
+            restored["cached"] = True
+            restored["cache_age_s"] = max(0, int(now - saved[1]))
+            restored["refresh_error"] = current["error"]
+            merged[name] = restored
+
+        _DATA_CACHE = merged
+        return dict(_DATA_CACHE)
+
+
+def _read_provider_cache():
+    with _DATA_CACHE_LOCK:
+        return dict(_DATA_CACHE)
+
+
+def _data_refresher():
     while True:
         time.sleep(_DATA_REFRESH_TTL)
         try:
-            _DATA_CACHE = _collect_providers(_opencode_db_arg, _opencode_go_arg)
+            fresh = _collect_providers(_opencode_db_arg, _opencode_go_arg)
+            _store_provider_cache(fresh)
         except Exception:  # noqa: BLE001
             pass
 
@@ -1700,18 +1746,17 @@ def collect(opencode_db=None, opencode_go=None):
     """Providers come from the background-refreshed cache (instant); sys comes
     from the warm PC-stats cache when enabled. Only the very first call may
     block on a slow network fetch."""
-    global _opencode_db_arg, _opencode_go_arg, _DATA_CACHE
+    global _opencode_db_arg, _opencode_go_arg
     _opencode_db_arg = opencode_db
     _opencode_go_arg = opencode_go
     _ensure_data_refresher()
-    if _DATA_CACHE:
-        data = dict(_DATA_CACHE)
+    data = _read_provider_cache()
+    if data:
         if system_monitor_enabled():
             data["sys"] = sys_stats()
         data["ts"] = int(time.time())
         return data
-    data = _collect_providers(opencode_db, opencode_go)
-    _DATA_CACHE = dict(data)
+    data = _store_provider_cache(_collect_providers(opencode_db, opencode_go))
     if system_monitor_enabled():
         data["sys"] = sys_stats()
     return data
@@ -1905,7 +1950,6 @@ BLE_DEVICE_NAME = "CC Island"
 MANUAL_REFRESH_MIN_GAP = 5  # seconds — throttle button-triggered refreshes
 SCAN_TIMEOUT_S = 20
 RECONNECT_DELAY_S = 3
-MAX_STALE_PROVIDER_S = 6 * 60 * 60
 
 
 async def ble_loop(interval_s, opencode_db=None, opencode_go=None):
@@ -1915,29 +1959,6 @@ async def ble_loop(interval_s, opencode_db=None, opencode_go=None):
     refresh = asyncio.Event()   # set when the watch's button asks for a refresh
     disconnected = asyncio.Event()
     last_push = [0.0]
-    last_good = {}
-
-    def remember_good(data):
-        now = time.time()
-        for name in ("claude", "codex", "opencode"):
-            provider = data.get(name) or {}
-            if "error" not in provider:
-                cached = dict(provider)
-                cached["_cached_at"] = now
-                last_good[name] = cached
-
-    def with_cached_windows(data):
-        now = time.time()
-        merged = dict(data)
-        for name in ("claude", "codex", "opencode"):
-            provider = dict(data.get(name) or {})
-            cached = last_good.get(name)
-            if "error" in provider and cached and now - cached.get("_cached_at", 0) <= MAX_STALE_PROVIDER_S:
-                restored = {k: v for k, v in cached.items() if not k.startswith("_")}
-                merged[name] = restored
-            else:
-                merged[name] = provider
-        return merged
 
     async def find_watch():
         target_uuid = NUS_SERVICE_UUID.lower()
@@ -1967,8 +1988,7 @@ async def ble_loop(interval_s, opencode_db=None, opencode_go=None):
 
     async def push(client, tag):
         data = collect(opencode_db, opencode_go)
-        remember_good(data)
-        payload = compact(with_cached_windows(data))
+        payload = compact(data)
         try:
             await client.write_gatt_char(NUS_RX_UUID, (payload + "\n").encode(), response=True)
         except Exception:
