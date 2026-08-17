@@ -9,7 +9,9 @@ namespace ble_nus {
 
 // Bring up the NimBLE host once and start advertising the Nordic UART Service
 // under the given device name. Idempotent — safe to call on every app open.
-void start(const char* device_name);
+// Returns false when initialization cannot reserve the required resources so
+// the caller can retry after the rest of the launcher has settled.
+bool start(const char* device_name);
 
 // If a complete '\n'-terminated line has arrived since the last call, copy it
 // (without the newline) into `out` and return true. Otherwise return false.

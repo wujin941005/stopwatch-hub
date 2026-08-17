@@ -19,6 +19,8 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <freertos/semphr.h>
+#include <esp_heap_caps.h>
+#include <nvs.h>
 #include <lwip/sockets.h>
 #include <lwip/netdb.h>
 #include <mooncake_log.h>
@@ -33,6 +35,9 @@ constexpr const char* TAG = "net";
 constexpr int kLineMax = 512;
 constexpr int kHttpGetBuf = kLineMax;
 constexpr int kConnectTimeoutMs = 5000;
+constexpr uint32_t kCachePersistMinIntervalMs = 5 * 60 * 1000;
+constexpr const char* kCacheNamespace = "cc_island";
+constexpr const char* kCacheKey = "stats";
 
 Config g_cfg = {};
 std::atomic<bool> g_cfg_set{false};
@@ -42,6 +47,10 @@ SemaphoreHandle_t g_mtx = nullptr;
 char g_ready[kLineMax];     // last complete line, guarded by g_mtx
 bool g_has_ready = false;
 std::atomic<bool> g_wake{false};  // blue button -> poll immediately
+char g_last_good[kLineMax]; // latest displayable line, guarded by g_mtx
+bool g_has_last_good = false;
+bool g_has_persisted_cache = false;
+TickType_t g_last_persist_tick = 0;
 
 void publish_line(const char* line, int len)
 {
@@ -52,6 +61,56 @@ void publish_line(const char* line, int len)
         g_has_ready = true;
         xSemaphoreGive(g_mtx);
     }
+}
+
+void replay_last_good()
+{
+    if (!g_mtx) return;
+    if (xSemaphoreTake(g_mtx, portMAX_DELAY) == pdTRUE) {
+        if (g_has_last_good) {
+            std::snprintf(g_ready, sizeof(g_ready), "%s", g_last_good);
+            g_has_ready = true;
+        }
+        xSemaphoreGive(g_mtx);
+    }
+}
+
+bool persist_line(const char* line)
+{
+    nvs_handle_t handle = 0;
+    esp_err_t err = nvs_open(kCacheNamespace, NVS_READWRITE, &handle);
+    if (err == ESP_OK) err = nvs_set_str(handle, kCacheKey, line);
+    if (err == ESP_OK) err = nvs_commit(handle);
+    if (handle != 0) nvs_close(handle);
+    if (err != ESP_OK) {
+        mclog::tagWarn(TAG, "failed to persist stats cache: {}", esp_err_to_name(err));
+        return false;
+    }
+    return true;
+}
+
+void load_persisted_line()
+{
+    nvs_handle_t handle = 0;
+    esp_err_t err = nvs_open(kCacheNamespace, NVS_READONLY, &handle);
+    if (err != ESP_OK) return;
+
+    char line[kLineMax];
+    size_t len = sizeof(line);
+    err = nvs_get_str(handle, kCacheKey, line, &len);
+    nvs_close(handle);
+    if (err != ESP_OK || len <= 1 || len > sizeof(line)) return;
+
+    if (xSemaphoreTake(g_mtx, portMAX_DELAY) == pdTRUE) {
+        std::snprintf(g_last_good, sizeof(g_last_good), "%s", line);
+        g_has_last_good = true;
+        g_has_persisted_cache = true;
+        g_last_persist_tick = xTaskGetTickCount();
+        std::snprintf(g_ready, sizeof(g_ready), "%s", line);
+        g_has_ready = true;
+        xSemaphoreGive(g_mtx);
+    }
+    mclog::tagInfo(TAG, "restored cached stats");
 }
 
 // --------------------------------------------------------------------------- //
@@ -158,14 +217,34 @@ void start(const Config& cfg)
     static bool task_started = false;
     if (!task_started) {
         g_cfg = cfg;
-        g_cfg_set.store(true);
         g_mtx = xSemaphoreCreateMutex();
-        xTaskCreate(poll_task, "cc_net", 6144, nullptr, 5, nullptr);
+        if (!g_mtx) {
+            mclog::tagError(TAG, "failed to allocate polling mutex");
+            return;
+        }
+
+        g_cfg_set.store(true);
+        load_persisted_line();
+
+        // This worker only performs raw lwIP I/O and publishes its response to
+        // RAM. NVS persistence remains on the caller's flash-safe task in
+        // remember_line(), so its long-lived stack can safely live in PSRAM.
+        const BaseType_t created = xTaskCreateWithCaps(
+            poll_task, "cc_net", 6144, nullptr, 5, nullptr,
+            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (created != pdPASS) {
+            mclog::tagError(TAG, "failed to allocate polling task");
+            g_cfg_set.store(false);
+            vSemaphoreDelete(g_mtx);
+            g_mtx = nullptr;
+            return;
+        }
         task_started = true;
     }
 
     g_active.store(true);
     g_wake.store(true);
+    replay_last_good();
     hub_wifi::start();
 }
 
@@ -195,6 +274,35 @@ bool poll_line(char* out, int out_size)
         xSemaphoreGive(g_mtx);
     }
     return got;
+}
+
+void remember_line(const char* line)
+{
+    if (!line || !g_mtx) return;
+    int len = (int)strlen(line);
+    if (len <= 0 || len >= kLineMax) return;
+
+    bool should_persist = false;
+    TickType_t now = xTaskGetTickCount();
+    if (xSemaphoreTake(g_mtx, portMAX_DELAY) == pdTRUE) {
+        bool changed = !g_has_last_good || strcmp(g_last_good, line) != 0;
+        if (changed) {
+            memcpy(g_last_good, line, len + 1);
+            g_has_last_good = true;
+            TickType_t min_interval = pdMS_TO_TICKS(kCachePersistMinIntervalMs);
+            should_persist = !g_has_persisted_cache ||
+                             now - g_last_persist_tick >= min_interval;
+        }
+        xSemaphoreGive(g_mtx);
+    }
+
+    if (should_persist && persist_line(line)) {
+        if (xSemaphoreTake(g_mtx, portMAX_DELAY) == pdTRUE) {
+            g_has_persisted_cache = true;
+            g_last_persist_tick = now;
+            xSemaphoreGive(g_mtx);
+        }
+    }
 }
 
 }  // namespace net
