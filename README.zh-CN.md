@@ -4,27 +4,67 @@
   <a href="README.md">English</a> | 简体中文
 </p>
 
-StopWatch Hub 是面向 **M5Stack StopWatch C152** 的多 App 固件工程：设备上仍然只有
-一份 ESP-IDF 固件、一个 M5Stack/Mooncake 硬件所有者，但可以安装多个职责明确的 App。
+StopWatch Hub 把 **PrintSphere**、**CC Island** 和 M5Stack 官方
+**M5StopWatch-UserDemo** 固件组合到 **M5Stack StopWatch C152** 上。设备仍然只运行
+一份 ESP-IDF 固件，硬件仍由一套 M5Stack/Mooncake 框架管理；PrintSphere 与
+CC Island 则作为两个独立 App，和官方表盘、秒表、闹钟、设置等原生 App 一起出现在启动器。
 
 | App | 用途 | 当前状态 |
 | --- | --- | --- |
-| **CC Island** | AI 编程用量与主机监控 | 原有 App 保留 |
-| **PrintSphere** | 完整拓竹打印状态、相机与控制 | v1.6.2 已集成，待真机验收 |
+| **CC Island** | AI 编程用量与主机监控 | 已集成并通过真机验证 |
+| **PrintSphere** | 完整拓竹打印状态、相机与控制 | 完整移植 v1.6.2；本地 MQTT 与共存已通过真机验证 |
 
-移植工程阶段仓库保持私有。仓库采用混合许可证：CC Island/通用集成代码为 MIT；
-PrintSphere 衍生文件为 FNCL v1.1，未经版权方另行书面授权仅限非商业用途。详见
-[LICENSE](LICENSE) 和 [NOTICE.md](NOTICE.md)。
+仓库采用混合许可证：CC Island 与本项目原创的 Hub 集成代码为 MIT；PrintSphere
+衍生文件为 FNCL v1.1，未经版权方另行书面授权仅限非商业用途。分发本项目或用于商业
+场景前请先阅读 [LICENSE](LICENSE) 和 [NOTICE.md](NOTICE.md)。
 
 当前集成的是固定版本 PrintSphere v1.6.2 的完整源码，不是精简 LAN 状态页。合并固件
-已经完整编译通过，并能放进两个 6 MiB OTA 槽；仍需 C152 真机验收。进度与边界见
-[移植状态](docs/porting-status.md)。
+已经在 C152 真机完成编译、刷写和双 App 共存验证，共享 Wi-Fi、SNTP、RTC 持久化和
+设备级时区均已运行。打印机、相机、控制、配网与 OTA 的全部组合仍按
+[移植状态](docs/porting-status.md)逐项验收。
+
+## 两个 App 怎样进入原生固件
+
+`scripts/install_firmware.sh` 会从锁定的 M5Stack V0.5 官方固件生成一棵构建目录，
+再把本项目安装进去。只有这棵生成的官方固件构建目录会收到集成修改；锁定的
+`vendor/PrintSphere` 子模块保持不变：
+
+```text
+M5StopWatch-UserDemo（一份合并后的 StopWatch-UserDemo 固件）
+├── 官方 Mooncake App        表盘、秒表、闹钟、设置……
+├── CC Island App            firmware/app_codex
+│   └── 电脑端 bridge        Wi-Fi HTTP 轮询和/或 BLE NUS 推送
+├── PrintSphere App          firmware/app_printsphere
+│   └── PrintSphere v1.6.2   完整源码作为固件 service 参与构建
+└── 共享平台
+    ├── M5Stack HAL          显示、触摸、LVGL、PMU、音频、I2C、RTC、FAT
+    ├── hub_wifi             两个 App 与官方配网页共用的 Wi-Fi 所有者
+    └── hub_time             SNTP、UTC RTC 持久化和设备级时区
+```
+
+安装脚本明确完成五件事：
+
+1. 把锁定版本的 M5Stack 官方固件 clone 到被 Git 忽略的 `build-firmware/`。
+2. 复制 CC Island、PrintSphere 的 Mooncake App 外壳、图标、共享 Wi-Fi/时间服务和
+   双 OTA 分区表。
+3. 从 `vendor/PrintSphere` 物化完整 PrintSphere 源码，把它原先独占硬件的调用替换为
+   M5Stack 适配层，同时保持上游子模块不变。
+4. 在官方启动器与 CMake 中注册 `AppCodex` 和 `AppPrintSphere`。Mooncake 只创建一次
+   它们的长期服务；用户进入或退出 App 时，再调用各自的 open/close 生命周期。
+5. 生成一份合并的 `StopWatch-UserDemo` 镜像。PrintSphere OTA 只接受新的 Hub 合并
+   镜像，避免误刷上游独立 PrintSphere 后删掉 CC Island 或官方 App。
+
+因此硬件所有权始终清晰：两个 App 共用 Wi-Fi 和系统时间，但各自维护 UI、运行状态与
+NVS namespace。PrintSphere 的打印机/Cloud 凭证保存在手表自己的 namespace；
+CC Island 的 provider 凭证、本地日志与 OpenCode 数据库始终留在 bridge 主机，只把
+最终显示数字传给手表。
 
 ## PrintSphere
 
 启动器里的 **PrintSphere** App 保留上游 LAN/Cloud MQTT、Cloud REST 登录与 2FA、
 Hybrid 数据源、多打印机、AMS 与完整错误详情、云端封面、本地 JPEG 相机、打印控制、
-带 PIN 的 Web Config、Wi-Fi 扫描与 fallback AP、时区、屏幕旋转、提示音与自定义 WAV、
+带 PIN 的 Web Config、Wi-Fi 扫描与 fallback AP、浏览器检测且与官方表盘共享的设备级时区、
+屏幕旋转、提示音与自定义 WAV、
 USB Improv 配网以及 OTA。
 
 移植改变的是硬件归属，不是删功能：
@@ -37,8 +77,37 @@ USB Improv 配网以及 OTA。
   `http://192.168.4.1:8080`，密码 `printsphere`；
 - OTA 只接受合并后的 `StopWatch-UserDemo` 镜像，拒绝会覆盖其他 App 的上游独立镜像。
 
-最终镜像为 5,718,240 字节（`0x5740e0`），每个 6 MiB OTA 槽还剩 573,216 字节
-（`0x8bf20`，9%）。
+> [!WARNING]
+> Bambu Cloud 登录使用的是非官方账号接口。在本项目测试的中国区账号上，完成邮箱验证码
+> 登录后，Bambu Handy 与 Bambu Studio 的原有会话同时失效。我们不能据此断言拓竹实行
+> 固定的“单会话政策”，但对主账号已经足以把 **Local only** 作为默认推荐。只有确实需要
+> 云端能力、并能接受官方客户端可能需要重新登录时，才建议启用 Hybrid/Cloud。
+
+最新正式镜像为 5,680,496 字节（`0x56ad70`），每个 6 MiB OTA 槽还剩
+610,960 字节（`0x95290`，10%）。诊断版还在 C152 真机上完成了六轮完整的
+“启动器 -> PrintSphere -> 启动器 -> CC Island -> 启动器”循环；每次打开
+PrintSphere 都成功连接并订阅本地拓竹打印机 MQTT。实测内部堆历史最低值为
+6,043 字节，所有采样任务栈至少还剩 1,420 字节；全程没有 OOM、分配失败、panic、
+看门狗、栈溢出或重启。
+
+### PrintSphere 首次使用
+
+1. 刷入本仓库生成的 **StopWatch Hub 合并固件**；安装 Hub 后不要再刷上游独立版
+   PrintSphere，否则会覆盖 CC Island 和官方 App。
+2. 等待手表连接 `.env` 中配置的共享 Wi-Fi。连不上时可使用 PrintSphere fallback AP
+   （密码 `printsphere`），打开 `http://192.168.4.1:8080`。
+3. 在同一局域网打开 `http://手表IP:8080`。如果页面已锁定，在 PrintSphere 界面任意
+   位置长按一秒，再输入手表显示的六位 PIN。
+4. 日常使用推荐选择 **Local only**，填写打印机局域网地址与 Access Code。只有需要
+   云端封面/元数据或兜底、并接受上面的官方客户端会话风险时，才选择 Hybrid/Cloud。
+5. 确认浏览器检测出的时区并点击 **Apply**。时区会作为设备设置保存，由 PrintSphere
+   和官方表盘共享。选择打印机后，从启动器打开 **PrintSphere** 即可。
+
+固件内置 56 个常见 IANA 时区；如果浏览器报告的地区尚未收录，PrintSphere 会保留
+当前设备时区，不会再强制改成 UTC。
+
+这里的 8080 是手表的端口；CC Island bridge 也可以在电脑上使用 8080。两者位于不同
+主机，不会冲突。
 
 ## CC Island
 
@@ -53,7 +122,8 @@ USB Improv 配网以及 OTA。
   <img src="docs/screenshots/codex-page.png" width="48%" alt="从手表帧缓冲抓取的 Codex 独立页面">
 </p>
 
-左边是第一版经典双行布局的真机照片；右边是当前 Codex 独立页面，由手表帧缓冲直接抓取。
+左边是第一版经典双行布局的真机照片；右边是加入电量底栏前的 Codex 独立页面帧缓冲截图，
+当前固件保留相同主页面，并增加下文说明的电池图标与百分比底栏。
 
 CC Island 把一块 **M5Stack StopWatch**（圆形 AMOLED，ESP32‑S3）变成 AI
 编程用量与主机健康状态的小表盘。它支持 **Claude Code（橙）**、**Codex（蓝）**、
@@ -64,10 +134,25 @@ CC Island 把一块 **M5Stack StopWatch**（圆形 AMOLED，ESP32‑S3）变成 
   Codex 与 OpenCode 各自独占一页
 - **蓝牙 BLE** 与 **Wi‑Fi HTTP 轮询**两种传输，可并存
 - **主机系统页**：电脑名、CPU、内存、磁盘占用与读写、网络上下行；支持自动轮播和左右滑动
+- **手表电量栏**：所有 CC Island 页面底部显示分档电池图标与百分比，并用颜色区分充电与低电量
 
 灵感来自 [CodexIsland](https://github.com/ericjypark/codex-island)（显示在 MacBook 刘海里）。
 **本地优先，provider 凭证始终留在主机**：bridge 读取你 CLI 已经写好的凭证、查询各家官方用量接口、
 从本地会话日志计算统计，再把最终数字通过**蓝牙 BLE** 或 **Wi‑Fi HTTP** 传给手表。
+
+### CC Island 首次使用
+
+1. 复制 `.env.example` 为 `.env`，在编译前填写共享 Wi-Fi、bridge 地址、页面布局、
+   刷新间隔和可选系统页。
+2. 刷入与 PrintSphere 相同的 StopWatch Hub 合并固件。
+3. 运行 `uv sync`，然后选择 Wi-Fi bridge
+   （`uv run python bridge/codexisland_bridge.py --serve 8080`）或 BLE bridge
+   （`uv run python bridge/codexisland_bridge.py --ble 5`）。
+4. 从手表启动器打开 **CC Island**。Wi-Fi 模式开始轮询配置的电脑；BLE 模式会在
+   App 活动时广播并接受 bridge 连接。
+
+CC Island 不需要 Bambu 凭证，PrintSphere 也不需要电脑上的 Claude、Codex 或
+OpenCode 凭证；两者只共享设备级基础服务。
 
 ## 项目沿革
 
@@ -87,7 +172,8 @@ CC Island 把一块 **M5Stack StopWatch**（圆形 AMOLED，ESP32‑S3）变成 
 | 低频推送 | BLE（`bleak`） | 均可 | Windows、macOS、Linux |
 
 功能最完整的组合是 `CC_LAYOUT=pages` + Wi‑Fi polling，再按需开启系统页；偏好原版
-高密度界面则使用 `rows`。同一份固件也可以同时保留 BLE 与 Wi‑Fi。
+高密度界面则使用 `rows`。同一份固件也可以同时保留 BLE 与 Wi‑Fi。provider、bridge
+或 Wi‑Fi 短暂异常时会保留最后数据，手表重启后也能从 Flash 恢复。
 
 ### 三平台支持矩阵
 
@@ -132,7 +218,8 @@ Bridge 运行在 WSL 时，还会自动检查挂载进来的 Windows 用户目�
 原生命令和 `/proc` 兜底。系统监控仍默认关闭，因为它和 AI 用量是独立功能。
 
 左右滑动可切页；**橙色按钮**切换 `AUTO` / `MAN` 自动或手动轮播；**蓝色按钮**
-请求立即刷新。设置 `CC_AUTO_SWITCH_MS=0` 可让固件默认从手动模式启动。
+请求立即刷新。设置 `CC_AUTO_SWITCH_MS=0` 可让固件默认从手动模式启动。底栏会在所有
+页面持续显示 `AUTO`/`MAN` 与手表电量；百分比后的 `+` 表示已接入外部电源。
 
 ## 架构
 
@@ -142,9 +229,9 @@ Bridge 运行在 WSL 时，还会自动检查挂载进来的 Windows 用户目�
    · Claude/Codex 接口 + 本地日志                  · 双行或 provider 独立页面（LVGL）
    · OpenCode SQLite + 可选 Go 配额                · 滑动 + 自动/手动轮播
    · 三平台原生指标 + WSL Windows 集成               · 可选主机系统页
-   · provider 缓存 30 秒 / 系统约 4 秒             · Wi-Fi polling + BLE NUS 接收
+   · 30 秒刷新 + 6 小时 last-good 回退              · Wi-Fi polling + BLE NUS 接收
    · GET /stats ─────────HTTP (Wi‑Fi)─────────▶   · 蓝键立即刷新
-   · 紧凑 JSON 推送 ───蓝牙(NUS)──────────────▶   · 过阈值振动
+   · 紧凑 JSON 推送 ───蓝牙(NUS)──────────────▶   · Flash 持久化最后有效数据
 ```
 
 手表是被动的 BLE 外设（Mac/PC 连上写入），也可连 Wi‑Fi 定时轮询。**token、日志、
@@ -152,7 +239,9 @@ API 凭证和 Cookie 都不会传到手表**，只传算好的数字。
 
 ## 快速开始
 
-**1. 刷固件**（需要 [ESP‑IDF v5.5.4](https://docs.espressif.com/projects/esp-idf/en/v5.5.4/esp32s3/index.html)）
+### 1. 构建并刷入合并固件
+
+需要 [ESP‑IDF v5.5.4](https://docs.espressif.com/projects/esp-idf/en/v5.5.4/esp32s3/index.html)。
 
 `.env` 同时包含需要编进手表的配置，以及只由 bridge 运行时读取的配置：
 
@@ -169,11 +258,14 @@ provider 密钥不会写入固件。Codex、Claude 复用 bridge 主机已有的
 OpenCode 本地统计只读查询它的 SQLite 数据库。
 
 ```bash
+git submodule update --init --recursive  # clone 仓库后先拉取锁定的 PrintSphere 源码
 cp .env.example .env                # 本地配置与敏感信息，已被 Git 忽略，绝对不要提交
 # 编辑 Wi-Fi、bridge 地址、布局、刷新间隔、可选系统监控和 OpenCode Go 配置
 ./scripts/install_firmware.sh          # clone 出厂固件并集成 app（到 ./build-firmware）
 . ~/esp/esp-idf/export.sh
-cd build-firmware && idf.py build && idf.py -p /dev/cu.usbmodemXXXX flash
+cd build-firmware
+idf.py build
+idf.py -p /dev/cu.usbmodemXXXX flash
 ```
 `install_firmware.sh` 只把 `CC_*` 配置写进同样被忽略的 `build-firmware/`；Git 跟踪
 的源码只保留占位值。Wi-Fi 名称和密码会随固件写入手表；provider API 凭证与
@@ -182,7 +274,20 @@ Cloud 等设置放在自己的 NVS namespace；它的低频状态服务与 8080 
 随 Mooncake 创建启动。打开 **CC Island** 后才会启动它的 BLE/HTTP 传输；打开
 **PrintSphere** 后显示完整界面并启用屏幕、相机等 App 范围的工作。
 
-**2. 跑 bridge（两种模式，任选其一）**
+> [!CAUTION]
+> 绝对不要公开上传使用个人 `.env` 构建的 `StopWatch-UserDemo.bin`：镜像里包含 Wi-Fi
+> 凭证和 bridge 地址。公开 Release 必须在没有个人环境文件的情况下构建，再让用户通过
+> setup AP/USB 自行配网。README 记录的真机测试镜像不会被 Git 跟踪。
+
+### 2. 配置 PrintSphere
+
+手表重新连网后打开 `http://手表IP:8080`，选择 Hybrid、Cloud 或 local-only 模式，
+配置打印机连接，并确认浏览器检测的时区。fallback AP 与 PIN 解锁过程见
+[PrintSphere 首次使用](#printsphere-首次使用)。这一步不依赖 CC Island bridge。
+
+### 3. 运行 CC Island bridge
+
+Wi-Fi 与 BLE 两种模式任选其一。
 
 先安装一次 [uv](https://docs.astral.sh/uv/getting-started/installation/)，再创建锁定的
 运行环境。Windows PowerShell、macOS、Linux 使用相同命令：
@@ -215,6 +320,9 @@ macOS 首次运行会弹蓝牙权限；Linux 需要可用的 BlueZ/D-Bus。仓�
 
 - **自动刷新（Wi‑Fi）**：源码模板默认 10 秒，`.env.example` 使用 5 秒；provider 数据
   缓存 30 秒；开启后系统指标约 4 秒刷新，所以手表 5 秒 polling 不会每次都请求 provider
+- **断线缓存**：provider 刷新失败后，bridge 最多 6 小时继续返回最后一次成功数据。手表也会
+  在内存保留最新有效 Codex payload，并最多每 5 分钟写入一次 Flash；重新打开 app 或设备重启时
+  如果 bridge 不可达，会先显示缓存，不会把页面清成 0。
 - **自动刷新（BLE）**：每 N 分钟（默认 5；Anthropic 接口会限流，别低于几分钟）。
 - **切换页面**：左右滑动；源码兜底值是每 5 秒自动轮播，**橙键**切换 `AUTO`
   （按定时器轮播）/ `MAN`（停留在当前页，直到手动滑动）；

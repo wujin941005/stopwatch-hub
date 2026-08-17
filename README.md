@@ -4,31 +4,79 @@
   English | <a href="README.zh-CN.md">简体中文</a>
 </p>
 
-StopWatch Hub is a multi-app firmware integration for the **M5Stack StopWatch
-C152**. It keeps one ESP-IDF image and one M5Stack/Mooncake hardware owner while
-hosting independently scoped apps:
+StopWatch Hub combines **PrintSphere** and **CC Island** with M5Stack's original
+**M5StopWatch-UserDemo** firmware for the **M5Stack StopWatch C152**. The watch
+still runs one ESP-IDF image and one M5Stack/Mooncake hardware owner; PrintSphere
+and CC Island are installed as independent launcher Apps beside the stock watch
+faces, stopwatch, alarm, settings, and other factory Apps.
 
 | App | Purpose | Status |
 | --- | --- | --- |
-| **CC Island** | AI coding usage and host monitoring | Existing app preserved |
-| **PrintSphere** | Complete Bambu printer display and control | v1.6.2 integrated; device validation pending |
+| **CC Island** | AI coding usage and host monitoring | Integrated and device-validated |
+| **PrintSphere** | Complete Bambu printer display and control | Full v1.6.2 port; local MQTT and coexistence device-validated |
 
-The repository is private while the port is being engineered. It contains
-mixed-license code: CC Island/integration code is MIT, while PrintSphere-derived
-files are FNCL v1.1 and restricted to non-commercial use. See
-[LICENSE](LICENSE) and [NOTICE.md](NOTICE.md).
+The repository contains mixed-license code: CC Island and the original Hub
+integration code are MIT, while PrintSphere-derived files are FNCL v1.1 and
+restricted to non-commercial use unless separately licensed. Review
+[LICENSE](LICENSE) and [NOTICE.md](NOTICE.md) before redistributing or using the
+combined firmware commercially.
 
 The complete pinned PrintSphere v1.6.2 source is integrated as a launcher App,
-not reduced to a LAN status page. The combined firmware builds successfully and
-fits dual 6 MiB OTA slots. Physical C152 acceptance testing remains; see the
-[porting status](docs/porting-status.md).
+not reduced to a LAN status page. The combined firmware has been built, flashed,
+and run on a physical C152 with both Apps, shared Wi-Fi, SNTP, RTC persistence,
+and device-wide time-zone handling active. End-to-end acceptance for every
+printer, camera, control, provisioning, and OTA combination is still tracked in
+the [porting status](docs/porting-status.md).
+
+## How the two Apps live in the factory firmware
+
+`scripts/install_firmware.sh` generates a build tree from the pinned M5Stack
+V0.5 factory firmware and installs this project into it. Only that generated
+factory checkout receives the integration edits; the pinned PrintSphere
+submodule remains unchanged:
+
+```text
+M5StopWatch-UserDemo (one combined StopWatch-UserDemo image)
+├── stock Mooncake Apps       watch faces, stopwatch, alarm, settings, ...
+├── CC Island App             firmware/app_codex
+│   └── host bridge           Wi-Fi HTTP polling and/or BLE NUS push
+├── PrintSphere App           firmware/app_printsphere
+│   └── PrintSphere v1.6.2    full source materialized as a firmware service
+└── shared platform
+    ├── M5Stack HAL           display, touch, LVGL, PMU, audio, I2C, RTC, FAT
+    ├── hub_wifi              one station/AP owner for both Apps and stock setup
+    └── hub_time              SNTP, UTC RTC persistence, and device time zone
+```
+
+The installer performs five deliberate steps:
+
+1. Clone the pinned M5Stack factory firmware into the ignored
+   `build-firmware/` directory.
+2. Copy the CC Island and PrintSphere Mooncake App shells, icons, shared Wi-Fi
+   and time services, and the dual-OTA partition table into that checkout.
+3. Materialize the complete pinned PrintSphere source from
+   `vendor/PrintSphere`, replacing standalone hardware ownership with asserted
+   M5Stack adapters while leaving the upstream submodule unchanged.
+4. Register `AppCodex` and `AppPrintSphere` in the factory launcher and CMake
+   build. Mooncake creates their long-lived services once, then calls each App's
+   open/close lifecycle as the user enters or leaves it.
+5. Build one combined `StopWatch-UserDemo` image. PrintSphere OTA accepts only
+   another combined Hub image, so an upstream standalone image cannot silently
+   remove CC Island or the stock Apps.
+
+This division keeps hardware ownership unambiguous. Both Apps share the Wi-Fi
+station and system clock, but use separate App state and NVS namespaces.
+PrintSphere printer/cloud credentials stay on the watch in its namespace;
+CC Island's provider credentials, local logs, and OpenCode database stay on the
+bridge host and only computed display values reach the watch.
 
 ## PrintSphere
 
 The **PrintSphere** App preserves upstream LAN and Cloud MQTT, Cloud REST login
 and 2FA, hybrid source selection, multiple printers, AMS/error detail, cover
 preview, supported local JPEG cameras, printer controls, Web Config + PIN,
-Wi-Fi scan/fallback AP, time zone, display rotation, sound events/custom WAV,
+Wi-Fi scan/fallback AP, browser-detected per-device time zone shared with the
+official watch faces, display rotation, sound events/custom WAV,
 USB Improv provisioning and OTA.
 
 The adaptations are ownership changes rather than feature removals:
@@ -44,8 +92,44 @@ The adaptations are ownership changes rather than feature removals:
 - OTA accepts only a combined `StopWatch-UserDemo` image, never an upstream
   standalone PrintSphere image that would erase the other Apps.
 
-The measured image is 5,718,240 bytes (`0x5740e0`), leaving 573,216 bytes
-(`0x8bf20`, 9%) in each 6 MiB OTA slot.
+> [!WARNING]
+> Bambu Cloud login uses unofficial account APIs. On the tested CN account,
+> completing an email-code login coincided with Bambu Handy and Bambu Studio
+> losing their existing sessions. This is not a documented Bambu single-session
+> policy, but it is enough to make **Local only** the recommended default for a
+> primary account. Cloud/Hybrid mode is optional and should be enabled only if
+> you accept that the official clients may require another login.
+
+The latest formal image is 5,680,496 bytes (`0x56ad70`), leaving 610,960 bytes
+(`0x95290`, 10%) in each 6 MiB OTA slot. A diagnostic build also completed six
+full Launcher -> PrintSphere -> Launcher -> CC Island -> Launcher cycles on a
+physical C152. Every PrintSphere opening connected and subscribed to the local
+Bambu printer over MQTT. The lowest observed internal-heap watermark was 6,043
+bytes; all measured task stacks retained at least 1,420 bytes, with no OOM,
+allocation failure, panic, watchdog, stack overflow, or reset.
+
+### PrintSphere first-use guide
+
+1. Flash the **combined StopWatch Hub image** from this repository. Do not flash
+   an upstream standalone PrintSphere image after installing the Hub.
+2. Let the watch join the shared Wi-Fi configured in `.env`. If it cannot join,
+   use PrintSphere's fallback setup AP (password `printsphere`) and open
+   `http://192.168.4.1:8080`.
+3. On the same LAN, open `http://<watch-ip>:8080`. If the portal is locked,
+   long-press the PrintSphere display for one second and enter the displayed
+   six-digit PIN.
+4. Choose **Local only** for the safest normal setup, then configure the printer
+   LAN address and access code. Choose Hybrid/Cloud only if you need cloud cover
+   metadata or fallback and accept the official-client session warning above.
+5. Confirm the browser-detected time zone and press **Apply**. It is saved as a
+   device setting shared by PrintSphere and the stock watch faces. Then select
+   the printer and open **PrintSphere** from the launcher.
+
+The firmware includes 56 common IANA zones. If a browser reports an unlisted
+zone, PrintSphere keeps the existing device time zone instead of forcing UTC.
+
+The portal runs on the watch's port 8080. CC Island's bridge may also use port
+8080 on the computer; these do not conflict because they are different hosts.
 
 ## CC Island
 
@@ -62,8 +146,10 @@ The measured image is 5,718,240 bytes (`0x5740e0`), leaving 573,216 bytes
   <img src="docs/screenshots/codex-page.png" width="48%" alt="Current Codex full-page layout captured from the framebuffer">
 </p>
 
-Left: the first working two-row layout on real hardware. Right: the current
-full-page Codex UI, captured directly from the watch framebuffer.
+Left: the first working two-row layout on real hardware. Right: the full-page
+Codex UI captured directly from the watch framebuffer before the battery footer
+was added; current firmware keeps the same page and adds the footer documented
+below.
 
 CC Island turns an **M5Stack StopWatch** (round AMOLED, ESP32‑S3) into a tiny
 ambient display for AI coding usage and host health. It monitors Claude Code
@@ -77,13 +163,32 @@ It supports three providers and two transports:
 - **Bluetooth LE and Wi‑Fi HTTP polling** — both optional and able to coexist.
 - **Host-system monitoring** — PC name, CPU, memory, disk space and I/O, plus
   network upload/download; pages can auto-cycle or be swiped manually.
+- **Watch battery footer** — level-aware battery icon and percentage on every
+  CC Island page, with charging and low-battery color states read from the
+  factory PMIC/HAL.
 
 It's a hardware companion in the spirit of
 [CodexIsland](https://github.com/ericjypark/codex-island) (which lives in the
 MacBook notch): **local-first; provider credentials stay on the host.** A small
 bridge reads the credentials your CLIs already wrote, queries the providers' own usage
 endpoints, computes local statistics, and sends only the finished numbers to
-the watch over Bluetooth LE or Wi‑Fi HTTP.
+the watch over Bluetooth LE or Wi-Fi HTTP.
+
+### CC Island first-use guide
+
+1. Copy `.env.example` to `.env` and set the shared watch Wi-Fi, bridge address,
+   layout, refresh interval, and optional System page before building.
+2. Flash the same combined firmware used by PrintSphere.
+3. Run `uv sync`, then start the host bridge with Wi-Fi
+   (`uv run python bridge/codexisland_bridge.py --serve 8080`) or BLE
+   (`uv run python bridge/codexisland_bridge.py --ble 5`).
+4. Open **CC Island** from the watch launcher. Wi-Fi mode begins polling the
+   configured host; BLE mode advertises and accepts the bridge connection while
+   the App is active.
+
+CC Island never needs Bambu credentials, and PrintSphere never needs the host's
+Claude, Codex, or OpenCode credentials. The two Apps only share device-level
+services.
 
 ## Project lineage
 
@@ -106,7 +211,9 @@ the direct upstream, firmware foundation, and product inspiration respectively.
 
 For the most complete experience, use `CC_LAYOUT=pages`, Wi‑Fi polling, and
 optionally enable the System page. Use `rows` if you prefer the original dense
-two-provider face. BLE and Wi‑Fi can coexist in one firmware image.
+two-provider face. BLE and Wi‑Fi can coexist in one firmware image. Transient
+provider, bridge, or Wi‑Fi failures keep the last good reading, including after
+the watch restarts.
 
 ### Platform support
 
@@ -160,7 +267,9 @@ Monitoring remains opt-in because it is independent from AI usage tracking.
 
 Swipe left/right to change pages. The **orange button** toggles auto/manual page
 rotation, and the **blue button** requests an immediate refresh. Set
-`CC_AUTO_SWITCH_MS=0` to start in manual mode.
+`CC_AUTO_SWITCH_MS=0` to start in manual mode. The footer keeps the current
+`AUTO`/`MAN` state and watch battery percentage visible on every page; a trailing
+`+` means external power is connected.
 
 ## Hardware
 
@@ -181,9 +290,9 @@ rotation, and the **blue button** requests an immediate refresh. Set
    • OpenRouter model-price catalog (cached)       • API-equivalent value (~$)
    • OpenCode SQLite + optional Go quota           • swipe + auto/manual page rotation
    • native host stats + WSL Windows integration   • optional host-system page
-   • 30 s provider cache / 4 s system refresh      • Wi-Fi polling + BLE NUS receiver
+   • 30 s refresh + 6 h last-good fallback         • Wi-Fi polling + BLE NUS receiver
    • GET /stats ─────────HTTP (Wi‑Fi)──────────▶   • blue button → immediate refresh
-   • compact JSON push ───BLE (NUS)────────────▶   • threshold-crossing vibration
+   • compact JSON push ───BLE (NUS)────────────▶   • flash-backed last-good display
 ```
 
 The watch is a passive BLE peripheral (the bridge connects and writes one short
@@ -205,10 +314,10 @@ stopwatch-hub/
 │   │   ├── ble/ble_nus.{h,cpp}     #   NimBLE Nordic UART Service (BLE transport)
 │   │   ├── net/net.{h,cpp,config.h}#   Wi-Fi station + HTTP polling
 │   │   └── debug/                  #   USB Serial JTAG framebuffer capture
-│   ├── app_printsphere/           # PrintSphere Mooncake App lifecycle
-│   ├── printsphere_core/          # small host-testable state/status mirror
-│   ├── printsphere_m5/            # C152/Mooncake lifecycle adapter
+│   ├── app_printsphere/           # PrintSphere Mooncake App lifecycle shell
+│   ├── printsphere_m5/            # C152/Mooncake hardware adapter
 │   ├── hub_wifi/                  # one Wi-Fi owner shared by both Apps
+│   ├── hub_time/                  # SNTP + UTC RTC + device time-zone owner
 │   ├── partitions.csv             # dual 6 MiB OTA + FAT layout for 16 MiB flash
 │   ├── assets/                    # generated LVGL RGB565 logo bitmaps (.c)
 │   └── tools/                     # SVG sources + bitmap generator; includes CC Island icon
@@ -225,7 +334,7 @@ stopwatch-hub/
 
 ## Quick start
 
-### 1. Flash the firmware
+### 1. Build and flash the combined firmware
 
 Requires [ESP‑IDF v5.5.4](https://docs.espressif.com/projects/esp-idf/en/v5.5.4/esp32s3/index.html).
 
@@ -245,6 +354,9 @@ CLI credentials already present on the bridge host; OpenCode local totals come
 from its read-only SQLite database.
 
 ```bash
+# fetch the pinned PrintSphere source after cloning this repository
+git submodule update --init --recursive
+
 # local settings and secrets (gitignored — never commit this file)
 cp .env.example .env
 # edit Wi-Fi, bridge host, layout, intervals, optional system monitoring,
@@ -270,7 +382,22 @@ Mooncake creation and listen on port 8080. Open **CC Island** to start its BLE
 and HTTP transports; opening **PrintSphere** reveals its dashboard and enables
 its App-scoped display/camera work.
 
-### 2. Run the bridge
+> [!CAUTION]
+> Never publish a `StopWatch-UserDemo.bin` built with your personal `.env`: that
+> image contains the configured Wi-Fi credentials and bridge address. Public
+> release artifacts must be built without a personal environment file and use
+> the setup AP/USB provisioning path instead. The formal device-test image
+> described in this README is intentionally not tracked by Git.
+
+### 2. Configure PrintSphere
+
+After the watch reconnects, open `http://<watch-ip>:8080`, choose Hybrid, Cloud,
+or local-only mode, configure the printer connection, and apply the detected
+time zone. See the [PrintSphere first-use guide](#printsphere-first-use-guide)
+for the fallback AP and portal PIN flow. This step is independent of the CC
+Island bridge.
+
+### 3. Run the CC Island bridge
 
 Install [uv](https://docs.astral.sh/uv/getting-started/installation/) once,
 then create the locked environment. The same command works in Windows
@@ -318,6 +445,10 @@ transport.
   (template default 10 s; `.env.example` uses 5 s). Provider API/log data is
   cached for 30 s; when enabled, host stats refresh every 4 s. A 5 s device
   poll therefore does not re-query providers every time.
+- **Offline cache**: a provider refresh error keeps its last good bridge value
+  for up to 6 hours. The watch also keeps the latest valid Codex payload in RAM
+  and persists it at most once every 5 minutes, so reopening the app or rebooting
+  while the bridge is unreachable shows the previous reading instead of zeros.
 - **Auto‑refresh (BLE)**: every N minutes (default 5; Anthropic rate‑limits the
   usage endpoint, so don't go below a few minutes).
 - **Page switch**: swipe left/right, or use automatic rotation (source

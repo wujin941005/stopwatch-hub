@@ -6,6 +6,10 @@ repository-wide license.
   restricted to non-commercial use unless separately licensed by the
   PrintSphere copyright holder.
 
-See NOTICE.md and the SPDX identifier in each source file for the applicable
-license and attribution. A firmware image containing PrintSphere-derived code
-is not an entirely MIT-licensed binary.
+See NOTICE.md and file-level SPDX identifiers for the applicable license and
+attribution. Unless a file says otherwise, `bridge/`, `firmware/app_codex/`,
+`firmware/hub_*`, project tooling, and tests are MIT; `vendor/PrintSphere`,
+`firmware/app_printsphere/`, `firmware/printsphere_core/`,
+`firmware/printsphere_m5/`, and `scripts/prepare_printsphere_port.py` are FNCL
+v1.1. A firmware image containing PrintSphere-derived code is not an entirely
+MIT-licensed binary.
