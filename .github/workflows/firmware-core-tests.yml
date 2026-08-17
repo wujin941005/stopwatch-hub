@@ -1,16 +1,32 @@
-name: Firmware core tests
+name: Firmware tests
 
 on:
   push:
     paths:
       - ".github/workflows/firmware-core-tests.yml"
+      - "firmware/app_codex/**"
+      - "firmware/app_printsphere/**"
+      - "firmware/hub_time/**"
+      - "firmware/hub_wifi/**"
       - "firmware/printsphere_core/**"
+      - "scripts/install_firmware.sh"
+      - "scripts/prepare_printsphere_port.py"
+      - "tests/test_printsphere_port.py"
       - "tests/printsphere_core_smoke.cpp"
+      - "vendor/PrintSphere"
   pull_request:
     paths:
       - ".github/workflows/firmware-core-tests.yml"
+      - "firmware/app_codex/**"
+      - "firmware/app_printsphere/**"
+      - "firmware/hub_time/**"
+      - "firmware/hub_wifi/**"
       - "firmware/printsphere_core/**"
+      - "scripts/install_firmware.sh"
+      - "scripts/prepare_printsphere_port.py"
+      - "tests/test_printsphere_port.py"
       - "tests/printsphere_core_smoke.cpp"
+      - "vendor/PrintSphere"
 
 permissions:
   contents: read
@@ -20,6 +36,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7.0.1
+        with:
+          submodules: recursive
+      - name: Validate PrintSphere materialization and firmware policies
+        run: python3 -m unittest discover -s tests -p 'test_printsphere_port.py' -v
       - name: Build hardware-independent core smoke test
         run: >-
           g++ -std=c++17 -Wall -Wextra -Werror -pthread
