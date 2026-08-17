@@ -28,6 +28,65 @@ and device-wide time-zone handling active. End-to-end acceptance for every
 printer, camera, control, provisioning, and OTA combination is still tracked in
 the [porting status](docs/porting-status.md).
 
+## Start here
+
+[Choose a path](#choose-a-path) · [Install](#detailed-setup) ·
+[PrintSphere](#printsphere) · [CC Island](#cc-island) ·
+[Troubleshooting](#troubleshooting)
+
+StopWatch Hub always builds **one combined firmware image**. You do not need a
+different build for each App: install it once, then use PrintSphere, CC Island,
+or both from the stock launcher.
+
+### Choose a path
+
+| Goal | Watch setup | Computer service | Bambu Cloud |
+| --- | --- | --- | --- |
+| Bambu printer display only | Configure PrintSphere with printer LAN details | Not required | Not required; **Local only** is recommended |
+| AI usage/host display only | Configure shared Wi-Fi and bridge address | CC Island bridge must run on the host | Not required |
+| Both Apps | Complete both setup paths | Required only for CC Island | Optional; read the session warning below |
+
+### Before cloning
+
+- **Hardware:** M5Stack StopWatch **C152 only**. Do not flash this image to the
+  original Waveshare PrintSphere boards or another M5Stack product.
+- **Firmware build:** Git, Bash, a USB data cable, and ESP-IDF v5.5.4. Linux and
+  macOS work directly; Windows users should use WSL2 for the firmware installer.
+- **CC Island host:** Windows, macOS, Linux, and WSL are supported. Install
+  [uv](https://docs.astral.sh/uv/) and sign in to the provider CLIs you want the
+  bridge to read.
+- **PrintSphere Local only:** have the printer LAN IP/hostname, serial number,
+  and LAN Access Code ready.
+
+There is intentionally no universal preconfigured binary: CC Island's Wi-Fi,
+bridge address, layout, and refresh behavior are build inputs. A binary built
+with somebody else's `.env` would also contain that person's network settings.
+
+### Clone and enter the project
+
+```bash
+git clone --recurse-submodules https://github.com/wujin941005/stopwatch-hub.git
+cd stopwatch-hub
+cp .env.example .env
+```
+
+If the repository was already cloned without submodules, run:
+
+```bash
+git submodule update --init --recursive
+```
+
+Then follow [Detailed setup](#detailed-setup) to edit `.env`, build, and flash.
+After the first boot:
+
+1. PrintSphere users configure the printer through
+   [Web Config](#printsphere-first-use-guide).
+2. CC Island users start and verify the
+   [host bridge](#run-the-cc-island-bridge).
+3. The watch IP is shown in the serial log as `station ready at ...`; it is also
+   visible in the router's DHCP client list. If station Wi-Fi is unavailable,
+   use the PrintSphere setup AP documented below.
+
 ## How the two Apps live in the factory firmware
 
 `scripts/install_firmware.sh` generates a build tree from the pinned M5Stack
@@ -174,17 +233,21 @@ bridge reads the credentials your CLIs already wrote, queries the providers' own
 endpoints, computes local statistics, and sends only the finished numbers to
 the watch over Bluetooth LE or Wi-Fi HTTP.
 
-### CC Island first-use guide
+### What CC Island needs
 
-1. Copy `.env.example` to `.env` and set the shared watch Wi-Fi, bridge address,
-   layout, refresh interval, and optional System page before building.
-2. Flash the same combined firmware used by PrintSphere.
-3. Run `uv sync`, then start the host bridge with Wi-Fi
-   (`uv run python bridge/codexisland_bridge.py --serve 8080`) or BLE
-   (`uv run python bridge/codexisland_bridge.py --ble 5`).
-4. Open **CC Island** from the watch launcher. Wi-Fi mode begins polling the
-   configured host; BLE mode advertises and accepts the bridge connection while
-   the App is active.
+Unlike PrintSphere's local-printer path, CC Island has a small companion process
+on a Windows, macOS, Linux, or WSL host:
+
+- The provider CLIs remain logged in on that host; no provider credential is
+  entered on the watch.
+- The bridge converts provider/local-log data into a compact display payload.
+- Use Wi-Fi polling for the most complete setup, or BLE NUS for low-frequency
+  push. Both transports can remain compiled into the same firmware.
+- Keep the bridge running for fresh readings. A temporary outage shows the
+  last-good cached payload instead of clearing the watch to zero.
+
+Installation and verification commands are in
+[Run the CC Island bridge](#run-the-cc-island-bridge).
 
 CC Island never needs Bambu credentials, and PrintSphere never needs the host's
 Claude, Codex, or OpenCode credentials. The two Apps only share device-level
@@ -192,7 +255,7 @@ services.
 
 ## Project lineage
 
-This maintained fork is based on
+The CC Island side of this project is derived from
 [alexjc-tech/cc-island](https://github.com/alexjc-tech/cc-island). Its firmware
 foundation comes from M5Stack's
 [M5StopWatch-UserDemo](https://github.com/m5stack/M5StopWatch-UserDemo), while
@@ -201,7 +264,7 @@ adapted from Eric Park's
 [CodexIsland](https://github.com/ericjypark/codex-island). These links represent
 the direct upstream, firmware foundation, and product inspiration respectively.
 
-## Pick a setup
+## CC Island setup choices
 
 | Goal | Transport | `.env` | Host support |
 | --- | --- | --- | --- |
@@ -232,7 +295,7 @@ remain explicit through `CODEX_HOME`, `CLAUDE_CONFIG_DIR`, and `OPENCODE_DB`.
 
 ---
 
-## What it shows / 显示什么
+## What CC Island shows
 
 Two display layouts are built in:
 
@@ -280,7 +343,7 @@ rotation, and the **blue button** requests an immediate refresh. Set
   ESP‑IDF + LVGL + Mooncake) as a new, self‑contained app — all the stock
   features (stopwatch, watch face, etc.) stay intact.
 
-## Architecture
+## CC Island architecture
 
 ```
   Windows / macOS / Linux (the brain)            StopWatch / "CC Island" app (the face)
@@ -332,11 +395,14 @@ stopwatch-hub/
 
 ---
 
-## Quick start
+## Detailed setup
 
-### 1. Build and flash the combined firmware
+### Build and flash the combined firmware
 
 Requires [ESP‑IDF v5.5.4](https://docs.espressif.com/projects/esp-idf/en/v5.5.4/esp32s3/index.html).
+The integration script requires Bash: use Linux or macOS directly, or WSL2 on
+Windows. The CC Island bridge itself can still run natively in Windows
+PowerShell after the watch is flashed.
 
 The same `.env` contains build-time watch settings and runtime bridge settings:
 
@@ -354,11 +420,11 @@ CLI credentials already present on the bridge host; OpenCode local totals come
 from its read-only SQLite database.
 
 ```bash
-# fetch the pinned PrintSphere source after cloning this repository
+# Run from the stopwatch-hub repository root.
 git submodule update --init --recursive
 
-# local settings and secrets (gitignored — never commit this file)
-cp .env.example .env
+# First setup only: create the gitignored local configuration.
+if [ ! -f .env ]; then cp .env.example .env; fi
 # edit Wi-Fi, bridge host, layout, intervals, optional system monitoring,
 # and optional OpenCode Go fields
 
@@ -369,8 +435,21 @@ cp .env.example .env
 . ~/esp/esp-idf/export.sh
 cd build-firmware
 idf.py build
-idf.py -p /dev/cu.usbmodemXXXX flash
+idf.py -p /dev/ttyACM0 flash  # Linux/WSL example; replace from the table below
 ```
+
+Replace the example with the port name reported by your operating system:
+
+| Build environment | Typical port | Note |
+| --- | --- | --- |
+| Linux | `/dev/ttyACM0` | Add the user to `dialout` if access is denied |
+| macOS | `/dev/cu.usbmodemXXXX` | The suffix varies after reconnects |
+| Windows ESP-IDF shell | `COM3` | The installer still needs Bash; WSL2 is recommended |
+| WSL2 | `/dev/ttyACM0` | Attach the USB device with `usbipd` first |
+
+For the first installation, use `idf.py flash` so the combined partition table
+and application are installed together. Do not run `erase-flash` unless you
+intend to wipe Wi-Fi, printer profiles, Cloud tokens, and other NVS settings.
 
 `install_firmware.sh` bakes the `CC_*` values into the ignored
 `build-firmware` checkout. Tracked source files keep placeholders only.
@@ -389,7 +468,16 @@ its App-scoped display/camera work.
 > the setup AP/USB provisioning path instead. The formal device-test image
 > described in this README is intentionally not tracked by Git.
 
-### 2. Configure PrintSphere
+After reboot, confirm the device service before configuring either App:
+
+```bash
+curl http://<watch-ip>:8080/api/health
+```
+
+Look for `"status":"ok"`, `"wifi_connected":true`, and a trustworthy system
+time. The serial log also prints the watch IP as `station ready at ...`.
+
+### Configure PrintSphere
 
 After the watch reconnects, open `http://<watch-ip>:8080`, choose Hybrid, Cloud,
 or local-only mode, configure the printer connection, and apply the detected
@@ -397,7 +485,7 @@ time zone. See the [PrintSphere first-use guide](#printsphere-first-use-guide)
 for the fallback AP and portal PIN flow. This step is independent of the CC
 Island bridge.
 
-### 3. Run the CC Island bridge
+### Run the CC Island bridge
 
 Install [uv](https://docs.astral.sh/uv/getting-started/installation/) once,
 then create the locked environment. The same command works in Windows
@@ -420,6 +508,16 @@ System page; rerun the firmware install/build/flash after changing it.
 Check `http://localhost:8080/` for text, `/json` for full data, or `/stats` for
 the compact watch payload.
 
+Before opening CC Island on the watch, verify the exact payload endpoint:
+
+```bash
+curl http://127.0.0.1:8080/stats
+```
+
+For Wi-Fi polling, also open `http://<bridge-lan-ip>:8080/stats` from another
+device on the LAN. If localhost works but the LAN address does not, fix the host
+firewall/bind/WSL networking path before debugging the watch.
+
 BLE mode (Windows / macOS / Linux through `bleak`):
 
 ```console
@@ -439,7 +537,7 @@ transport.
 
 ---
 
-## Using it
+## Using CC Island
 
 - **Auto‑refresh (Wi‑Fi)**: the watch polls the bridge every `net_config.h::poll_ms`
   (template default 10 s; `.env.example` uses 5 s). Provider API/log data is
@@ -460,7 +558,7 @@ transport.
   the bridge to push immediately (throttled to once / 5 s).
 - **Exit the app**: hold **both buttons** (the factory firmware's "go home").
 
-## Customizing
+## Customizing CC Island
 
 - **Local configuration** — copy `.env.example` to `.env`. `CC_WIFI_*`,
   `CC_BRIDGE_*`, and `CC_POLL_MS` configure Wi-Fi polling;
@@ -501,7 +599,7 @@ transport.
   valued (default `gpt-5.6-sol`). OpenCode router/subscription provider IDs are
   matched to an unambiguous public model ID when their publisher name differs.
 
-## How it works (data sources)
+## How CC Island works (data sources)
 
 - **Codex**: `GET https://chatgpt.com/backend-api/wham/usage` with the
   `access_token` from `CODEX_HOME/auth.json` (normally `~/.codex/auth.json`).
