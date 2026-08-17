@@ -23,6 +23,57 @@ CC Island 则作为两个独立 App，和官方表盘、秒表、闹钟、设置
 设备级时区均已运行。打印机、相机、控制、配网与 OTA 的全部组合仍按
 [移植状态](docs/porting-status.md)逐项验收。
 
+## 从这里开始
+
+[选择使用路径](#选择使用路径) · [安装](#完整安装) ·
+[PrintSphere](#printsphere) · [CC Island](#cc-island) ·
+[常见问题](#常见问题)
+
+StopWatch Hub 始终生成**一份合并固件**。不需要为两个 App 分别编译：安装一次后，
+直接在官方启动器里使用 PrintSphere、CC Island，或同时使用两者。
+
+### 选择使用路径
+
+| 目标 | 手表侧配置 | 电脑端服务 | Bambu Cloud |
+| --- | --- | --- | --- |
+| 只看拓竹打印机 | 用打印机局域网信息配置 PrintSphere | 不需要 | 不需要；推荐 **Local only** |
+| 只看 AI 用量/主机状态 | 配置共享 Wi-Fi 和 bridge 地址 | 电脑必须运行 CC Island bridge | 不需要 |
+| 两个 App 都用 | 完成上面两条配置 | 只有 CC Island 需要 | 可选；先阅读下文的会话风险 |
+
+### Clone 前准备
+
+- **硬件：**仅支持 M5Stack StopWatch **C152**。不要刷到 PrintSphere 原版 Waveshare
+  板或其他 M5Stack 产品。
+- **固件构建：**需要 Git、Bash、USB 数据线和 ESP-IDF v5.5.4。Linux/macOS 可直接
+  构建；Windows 推荐在 WSL2 中运行固件安装脚本。
+- **CC Island 主机：**支持 Windows、macOS、Linux 和 WSL。安装
+  [uv](https://docs.astral.sh/uv/)，并先登录希望 bridge 读取的 provider CLI。
+- **PrintSphere Local only：**准备好打印机局域网 IP/主机名、序列号与 LAN Access Code。
+
+项目不会提供带通用配置的预编译固件：CC Island 的 Wi-Fi、bridge 地址、布局与刷新策略
+是编译输入；使用他人 `.env` 构建的 binary 还会包含对方的网络配置。
+
+### Clone 并进入项目
+
+```bash
+git clone --recurse-submodules https://github.com/wujin941005/stopwatch-hub.git
+cd stopwatch-hub
+cp .env.example .env
+```
+
+如果已经 clone 但没有拉子模块，运行：
+
+```bash
+git submodule update --init --recursive
+```
+
+接着按[完整安装](#完整安装)编辑 `.env`、构建并刷机。首次启动后：
+
+1. PrintSphere 用户通过 [Web Config](#printsphere-首次使用)配置打印机。
+2. CC Island 用户启动并验证[电脑端 bridge](#运行-cc-island-bridge)。
+3. 串口日志会显示 `station ready at ...`；也可在路由器 DHCP 客户端列表查看手表 IP。
+   如果无法连接家庭 Wi-Fi，则使用下文说明的 PrintSphere setup AP。
+
 ## 两个 App 怎样进入原生固件
 
 `scripts/install_firmware.sh` 会从锁定的 M5Stack V0.5 官方固件生成一棵构建目录，
@@ -140,30 +191,31 @@ CC Island 把一块 **M5Stack StopWatch**（圆形 AMOLED，ESP32‑S3）变成 
 **本地优先，provider 凭证始终留在主机**：bridge 读取你 CLI 已经写好的凭证、查询各家官方用量接口、
 从本地会话日志计算统计，再把最终数字通过**蓝牙 BLE** 或 **Wi‑Fi HTTP** 传给手表。
 
-### CC Island 首次使用
+### CC Island 需要什么
 
-1. 复制 `.env.example` 为 `.env`，在编译前填写共享 Wi-Fi、bridge 地址、页面布局、
-   刷新间隔和可选系统页。
-2. 刷入与 PrintSphere 相同的 StopWatch Hub 合并固件。
-3. 运行 `uv sync`，然后选择 Wi-Fi bridge
-   （`uv run python bridge/codexisland_bridge.py --serve 8080`）或 BLE bridge
-   （`uv run python bridge/codexisland_bridge.py --ble 5`）。
-4. 从手表启动器打开 **CC Island**。Wi-Fi 模式开始轮询配置的电脑；BLE 模式会在
-   App 活动时广播并接受 bridge 连接。
+与 PrintSphere 的本地打印机连接不同，CC Island 需要在 Windows、macOS、Linux 或
+WSL 主机上运行一个轻量 companion bridge：
+
+- provider CLI 保持登录在主机上，不在手表输入 provider 凭证；
+- bridge 把 provider 接口和本地日志转换成紧凑的手表显示数据；
+- 推荐 Wi-Fi polling 获得最完整体验，也可以用 BLE NUS 做低频推送；两种传输可同时编入固件；
+- bridge 应保持运行以提供新数据；短暂断线时手表显示 last-good 缓存，不会清零。
+
+安装和验证命令见[运行 CC Island bridge](#运行-cc-island-bridge)。
 
 CC Island 不需要 Bambu 凭证，PrintSphere 也不需要电脑上的 Claude、Codex 或
 OpenCode 凭证；两者只共享设备级基础服务。
 
 ## 项目沿革
 
-这个持续维护的 fork 基于
+本项目的 CC Island 代码基础来自
 [alexjc-tech/cc-island](https://github.com/alexjc-tech/cc-island)。固件底座来自 M5Stack
 的 [M5StopWatch-UserDemo](https://github.com/m5stack/M5StopWatch-UserDemo)；AI 用量伴侣的
 产品思路和最初的 provider 鉴权方案则改编自 Eric Park 的
 [CodexIsland](https://github.com/ericjypark/codex-island)。三者分别代表直接上游、固件底座和
 产品灵感，因此在这里明确区分。
 
-## 先选使用方式
+## CC Island 使用方式
 
 | 目标 | 传输 | `.env` | 主机支持 |
 | --- | --- | --- | --- |
@@ -190,7 +242,7 @@ Bridge 运行在 WSL 时，还会自动检查挂载进来的 Windows 用户目�
 安装在 Windows 上也能读取。自定义目录可以通过 `CODEX_HOME`、
 `CLAUDE_CONFIG_DIR`、`OPENCODE_DB` 明确指定。
 
-## 显示内容
+## CC Island 显示内容
 
 内置两种显示布局：
 
@@ -221,7 +273,7 @@ Bridge 运行在 WSL 时，还会自动检查挂载进来的 Windows 用户目�
 请求立即刷新。设置 `CC_AUTO_SWITCH_MS=0` 可让固件默认从手动模式启动。底栏会在所有
 页面持续显示 `AUTO`/`MAN` 与手表电量；百分比后的 `+` 表示已接入外部电源。
 
-## 架构
+## CC Island 架构
 
 ```
   Windows / macOS / Linux（大脑）                手表 / CC Island app（脸）
@@ -237,11 +289,13 @@ Bridge 运行在 WSL 时，还会自动检查挂载进来的 Windows 用户目�
 手表是被动的 BLE 外设（Mac/PC 连上写入），也可连 Wi‑Fi 定时轮询。**token、日志、
 API 凭证和 Cookie 都不会传到手表**，只传算好的数字。
 
-## 快速开始
+## 完整安装
 
-### 1. 构建并刷入合并固件
+### 构建并刷入合并固件
 
 需要 [ESP‑IDF v5.5.4](https://docs.espressif.com/projects/esp-idf/en/v5.5.4/esp32s3/index.html)。
+集成脚本需要 Bash：Linux/macOS 可直接运行；Windows 推荐使用 WSL2 构建固件。手表刷好后，
+CC Island bridge 仍可在 Windows PowerShell 原生运行。
 
 `.env` 同时包含需要编进手表的配置，以及只由 bridge 运行时读取的配置：
 
@@ -258,15 +312,28 @@ provider 密钥不会写入固件。Codex、Claude 复用 bridge 主机已有的
 OpenCode 本地统计只读查询它的 SQLite 数据库。
 
 ```bash
-git submodule update --init --recursive  # clone 仓库后先拉取锁定的 PrintSphere 源码
-cp .env.example .env                # 本地配置与敏感信息，已被 Git 忽略，绝对不要提交
+# 在 stopwatch-hub 仓库根目录运行
+git submodule update --init --recursive
+if [ ! -f .env ]; then cp .env.example .env; fi  # 只在首次配置时创建
 # 编辑 Wi-Fi、bridge 地址、布局、刷新间隔、可选系统监控和 OpenCode Go 配置
 ./scripts/install_firmware.sh          # clone 出厂固件并集成 app（到 ./build-firmware）
 . ~/esp/esp-idf/export.sh
 cd build-firmware
 idf.py build
-idf.py -p /dev/cu.usbmodemXXXX flash
+idf.py -p /dev/ttyACM0 flash  # Linux/WSL 示例；其他平台按下表替换
 ```
+
+按构建环境替换示例端口：
+
+| 构建环境 | 常见端口 | 说明 |
+| --- | --- | --- |
+| Linux | `/dev/ttyACM0` | 权限不足时把用户加入 `dialout` |
+| macOS | `/dev/cu.usbmodemXXXX` | 重连后尾号可能变化 |
+| Windows ESP-IDF Shell | `COM3` | 安装脚本仍需要 Bash，推荐 WSL2 |
+| WSL2 | `/dev/ttyACM0` | 先用 `usbipd` 把 USB 设备附加到 WSL |
+
+首次安装应使用 `idf.py flash`，让合并分区表与 App 一起写入。除非明确要清空 Wi-Fi、
+打印机 profile、Cloud token 等 NVS 配置，否则不要运行 `erase-flash`。
 `install_firmware.sh` 只把 `CC_*` 配置写进同样被忽略的 `build-firmware/`；Git 跟踪
 的源码只保留占位值。Wi-Fi 名称和密码会随固件写入手表；provider API 凭证与
 OpenCode Cookie 始终留在 bridge 主机。PrintSphere 也可在运行时配 Wi-Fi，并把打印机、
@@ -279,13 +346,22 @@ Cloud 等设置放在自己的 NVS namespace；它的低频状态服务与 8080 
 > 凭证和 bridge 地址。公开 Release 必须在没有个人环境文件的情况下构建，再让用户通过
 > setup AP/USB 自行配网。README 记录的真机测试镜像不会被 Git 跟踪。
 
-### 2. 配置 PrintSphere
+重启后先确认设备服务正常，再配置任一 App：
+
+```bash
+curl http://手表IP:8080/api/health
+```
+
+应看到 `"status":"ok"`、`"wifi_connected":true`，且系统时间可信；串口日志也会以
+`station ready at ...` 输出手表 IP。
+
+### 配置 PrintSphere
 
 手表重新连网后打开 `http://手表IP:8080`，选择 Hybrid、Cloud 或 local-only 模式，
 配置打印机连接，并确认浏览器检测的时区。fallback AP 与 PIN 解锁过程见
 [PrintSphere 首次使用](#printsphere-首次使用)。这一步不依赖 CC Island bridge。
 
-### 3. 运行 CC Island bridge
+### 运行 CC Island bridge
 
 Wi-Fi 与 BLE 两种模式任选其一。
 
@@ -307,6 +383,15 @@ bridge 会自动读取 `.env`。OpenCode 本地用量无需额外配置；可选
 修改后需重新运行安装脚本、编译并刷入固件。浏览器可访问 `/` 看文本、`/json` 看完整
 数据、`/stats` 看手表载荷。
 
+在手表打开 CC Island 前，先验证实际载荷接口：
+
+```bash
+curl http://127.0.0.1:8080/stats
+```
+
+Wi-Fi polling 还应从局域网另一台设备访问 `http://bridge局域网IP:8080/stats`。如果
+localhost 正常但局域网地址打不开，应先处理防火墙、监听地址或 WSL 网络，再排查手表。
+
 蓝牙模式（通过 `bleak` 支持 Windows / macOS / Linux）：
 
 ```console
@@ -316,7 +401,7 @@ uv run python bridge/codexisland_bridge.py --ble 5
 macOS 首次运行会弹蓝牙权限；Linux 需要可用的 BlueZ/D-Bus。仓库自带的登录自启脚本
 目前只负责 macOS：`./scripts/setup_autostart.sh`。使用 `--json` 或不带参数可只检查数据。
 
-## 使用
+## 使用 CC Island
 
 - **自动刷新（Wi‑Fi）**：源码模板默认 10 秒，`.env.example` 使用 5 秒；provider 数据
   缓存 30 秒；开启后系统指标约 4 秒刷新，所以手表 5 秒 polling 不会每次都请求 provider
@@ -330,7 +415,7 @@ macOS 首次运行会弹蓝牙权限；Linux 需要可用的 BlueZ/D-Bus。仓�
 - **手动刷新**：按**蓝键**，手表振动并请求立即刷新（5 秒防抖）。
 - **退出 app**：同时长按**两个按钮**（出厂固件的“回主页”）。
 
-## 自定义
+## 自定义 CC Island
 
 - **本地配置** — 复制 `.env.example` 为 `.env`；`CC_WIFI_*`、`CC_BRIDGE_*`、
   `CC_POLL_MS` 控制 Wi-Fi，`CC_LAYOUT=rows|pages` 与 `CC_AUTO_SWITCH_MS` 控制页面，
@@ -364,7 +449,7 @@ macOS 首次运行会弹蓝牙权限；Linux 需要可用的 BlueZ/D-Bus。仓�
   `gpt-5.6-sol`。OpenCode 的订阅/router provider ID 与模型发布者不一致时，会在结果
   唯一的前提下按公开模型名匹配
 
-## 数据来源与金额口径
+## CC Island 数据来源与金额口径
 
 - **Codex**：使用 `CODEX_HOME/auth.json`（默认 `~/.codex/auth.json`）中的 access
   token 读取用量窗口，并解析 session JSONL 统计今天的 token；WSL 还会自动检查
