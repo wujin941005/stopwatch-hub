@@ -1,6 +1,6 @@
 # Notices and upstream sources
 
-StopWatch Hub is a private integration project for the M5Stack StopWatch C152.
+StopWatch Hub is a multi-App integration project for the M5Stack StopWatch C152.
 It combines separately licensed work and does not claim ownership of upstream
 projects or trademarks.
 
@@ -29,9 +29,10 @@ The complete upstream repository is pinned as `vendor/PrintSphere`; generated
 port files retain the upstream FNCL notices or use
 `SPDX-License-Identifier: LicenseRef-FNCL-1.1`. StopWatch Hub leaves the
 submodule unchanged and replaces board-global initialization only in the
-generated factory-firmware checkout. The port is named **PrintSphere** in the
-launcher. Its launcher icon is an independent design and is not a Bambu Lab
-trademark asset.
+generated factory-firmware checkout. `scripts/prepare_printsphere_port.py` is
+also FNCL-covered because it contains and emits PrintSphere-derived adapter
+code. The port is named **PrintSphere** in the launcher. Its launcher icon is an
+independent design and is not a Bambu Lab trademark asset.
 
 No affiliation with or endorsement by M5Stack, Bambu Lab, PrintSphere,
 Anthropic, OpenAI, OpenCode, or any other referenced project is implied.
