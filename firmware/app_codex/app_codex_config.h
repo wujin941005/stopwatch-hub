@@ -11,11 +11,14 @@
 // --------------------------------------------------------------------------- //
 
 // Page layout:
-//   true  = one page per provider (Codex page / OpenCode page / system page),
+//   true  = one page per provider (Codex / OpenCode / Claude / optional system page),
 //           each showing its own 5h + weekly(+monthly) windows with resets.
 //   false = classic: one AI page with two providers side by side, plus a
 //           system page. (Set from .env `CC_LAYOUT=pages|rows`.)
 inline const bool kLayoutPages = false;
+
+// Include OpenCode in the pages rotation. Set from .env `CC_OPENCODE_PAGE`.
+inline const bool kShowOpenCodePage = true;
 
 // Classic layout only — which two providers sit on the AI page:
 //   "c"  Claude Code, "x"  Codex, "o"  OpenCode

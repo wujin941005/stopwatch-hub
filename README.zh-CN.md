@@ -182,7 +182,7 @@ CC Island 把一块 **M5Stack StopWatch**（圆形 AMOLED，ESP32‑S3）变成 
 
 支持的 provider 与传输方式：
 - **Claude Code / Codex / OpenCode** 三个 provider，可选经典双行布局，也可让
-  Codex 与 OpenCode 各自独占一页
+  Codex、OpenCode 与 Claude 各自独占一页
 - **蓝牙 BLE** 与 **Wi‑Fi HTTP 轮询**两种传输，可并存
 - **主机系统页**：电脑名、CPU、内存、磁盘占用与读写、网络上下行；支持自动轮播和左右滑动
 - **手表电量栏**：所有 CC Island 页面底部显示分档电池图标与百分比，并用颜色区分充电与低电量
@@ -247,10 +247,12 @@ Bridge 运行在 WSL 时，还会自动检查挂载进来的 Windows 用户目�
 内置两种显示布局：
 
 - **`rows`**：经典紧凑布局，从 Claude Code、Codex、OpenCode 中任选两个放在同一页
-- **`pages`**：Codex 一页、OpenCode 一页，并可加入系统页；有空间完整显示各窗口
+- **`pages`**：Codex、OpenCode、Claude 各一页，并可加入系统页；有空间完整显示各窗口
   的重置时间和 OpenCode 月度配额
 
-运行 `scripts/install_firmware.sh` 前设置 `CC_LAYOUT=rows|pages`。系统监控默认关闭；
+运行 `scripts/install_firmware.sh` 前设置 `CC_LAYOUT=rows|pages`。
+不使用 OpenCode 时，设置 `CC_OPENCODE_PAGE=false` 可从独立页面布局中移除它；
+修改后需重新编译并刷入固件。系统监控默认关闭；
 设置 `CC_SYSTEM_MONITOR=true` 后才会采集主机指标并加入系统页。两种布局均可显示：
 
 - provider **用量窗口**：百分比、品牌色进度条、重置倒计时
@@ -302,7 +304,7 @@ CC Island bridge 仍可在 Windows PowerShell 原生运行。
 | 配置 | 谁读取 | 要重新刷表？ | 要重启 bridge？ |
 | --- | --- | --- | --- |
 | `CC_WIFI_*`、`CC_BRIDGE_*`、`CC_POLL_MS` | 固件安装脚本 | 要 | 不要 |
-| `CC_LAYOUT`、`CC_AUTO_SWITCH_MS` | 固件安装脚本 | 要 | 不要 |
+| `CC_LAYOUT`、`CC_OPENCODE_PAGE`、`CC_AUTO_SWITCH_MS` | 固件安装脚本 | 要 | 不要 |
 | `CC_SYSTEM_MONITOR` | 固件安装脚本 + bridge | 要 | 要 |
 | `OPENCODE_GO_*`、`OPENCODE_DB` | bridge | 不要 | 要 |
 | `CODEX_HOME`、`CLAUDE_CONFIG_DIR` | bridge | 不要 | 要 |
@@ -423,7 +425,7 @@ macOS 首次运行会弹蓝牙权限；Linux 需要可用的 BlueZ/D-Bus。仓�
   `build-firmware/` 都不会进入 Git
 - **双行 provider / 系统页** — `firmware/app_codex/app_codex_config.h` 中的
   `kTopProvider` / `kBottomProvider`（`"c"` Claude / `"x"` Codex / `"o"`
-  OpenCode）和 `kShowSystemPage`；独立页面布局目前固定生成 Codex、OpenCode 页
+  OpenCode）和 `kShowSystemPage`；独立页面布局固定生成 Codex、OpenCode、Claude 页
 - **Wi-Fi 默认模板** — `firmware/app_codex/net/net_config.h`
 - **配色 / 告警阈值** — `firmware/app_codex/app_codex.cpp`
   （`kClaudeColor` / `kCodexColor` / `kOpencodeColor` / `kAlertThreshold`）

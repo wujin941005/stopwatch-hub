@@ -250,6 +250,7 @@ lv_obj_t* s_root = nullptr;
 lv_obj_t* s_page_ai       = nullptr;  // classic layout page 0
 lv_obj_t* s_page_codex    = nullptr;  // pages layout page 0
 lv_obj_t* s_page_opencode = nullptr;  // pages layout page 1
+lv_obj_t* s_page_claude   = nullptr;  // pages layout page 2
 lv_obj_t* s_page_sys      = nullptr;
 int s_page                = 0;
 bool s_auto_switch        = true;
@@ -257,6 +258,11 @@ lv_obj_t* s_mode_lbl      = nullptr;
 lv_obj_t* s_battery_icon_lbl = nullptr;
 lv_obj_t* s_battery_lbl   = nullptr;
 uint32_t s_last_battery_ms = 0;
+
+// Claude page (pages layout)
+WinRow s_cl_5h;
+WinRow s_cl_7d;
+lv_obj_t* s_cl_cost = nullptr;
 
 // Codex page (pages layout)
 WinRow s_cx_5h;
@@ -301,7 +307,7 @@ lv_point_t s_gesture_last;
 
 int page_count()
 {
-    int n = kLayoutPages ? 2 : 1;  // provider pages
+    int n = kLayoutPages ? (kShowOpenCodePage ? 3 : 2) : 1;  // provider pages
     return kShowSystemPage ? n + 1 : n;
 }
 
@@ -309,7 +315,8 @@ lv_obj_t* page_obj(int idx)
 {
     if (kLayoutPages) {
         if (idx == 0) return s_page_codex;
-        if (idx == 1) return s_page_opencode;
+        if (kShowOpenCodePage && idx == 1) return s_page_opencode;
+        if (idx == (kShowOpenCodePage ? 2 : 1)) return s_page_claude;
         return s_page_sys;
     }
     return (idx == 0) ? s_page_ai : s_page_sys;
@@ -318,7 +325,7 @@ lv_obj_t* page_obj(int idx)
 void show_page(int idx)
 {
     s_page = ((idx % page_count()) + page_count()) % page_count();
-    for (lv_obj_t* p : {s_page_codex, s_page_opencode, s_page_ai, s_page_sys}) {
+    for (lv_obj_t* p : {s_page_codex, s_page_opencode, s_page_claude, s_page_ai, s_page_sys}) {
         if (p) lv_obj_add_flag(p, LV_OBJ_FLAG_HIDDEN);
     }
     lv_obj_t* target = page_obj(s_page);
@@ -609,20 +616,36 @@ void apply_oc_cost(double cost, std::int64_t tok)
     }
 }
 
-bool update_claude_row(cJSON* root)
+bool update_claude_page(cJSON* root)
 {
-    if (kLayoutPages) return false;
     cJSON* obj = cJSON_GetObjectItem(root, "c");
-    UsageRow* row = row_for_provider("c");
-    if (!cJSON_IsObject(obj) || has_error(obj) || !row) return false;
+    cJSON* h_item = cJSON_GetObjectItemCaseSensitive(obj, "h");
+    if (!cJSON_IsObject(obj) || has_error(obj) || !cJSON_IsNumber(h_item)) return false;
 
-    int h = jint(obj, "h");
+    int h = jint(obj, "h"), w = jint(obj, "w");
+    bool displayed = kLayoutPages;
     {
         LvglLockGuard lock;
-        row->apply_codex(h, jint(obj, "w"), jint(obj, "hr"));
-        apply_row_cost("c", jdbl(obj, "$"), jint64(obj, "t"));
+        if (kLayoutPages) {
+            s_cl_5h.apply(h, jint(obj, "hr"));
+            if (w >= 0) {
+                s_cl_7d.apply(w, jint(obj, "wr"));
+                s_cl_7d.set_visible(true);
+            } else {
+                s_cl_7d.set_visible(false);
+            }
+            char tok_s[12], b[44];
+            fmt_tokens(tok_s, sizeof(tok_s), jint64(obj, "t"));
+            std::snprintf(b, sizeof(b), "today ~$%.2f %s", jdbl(obj, "$"), tok_s);
+            if (s_cl_cost) lv_label_set_text(s_cl_cost, b);
+        } else if (UsageRow* row = row_for_provider("c")) {
+            row->apply_codex(h, w, jint(obj, "hr"));
+            apply_row_cost("c", jdbl(obj, "$"), jint64(obj, "t"));
+            displayed = true;
+        }
     }
 
+    if (!displayed) return false;
     bool crossed = (s_cl_last_5h >= 0 && s_cl_last_5h < kAlertThreshold &&
                     h >= kAlertThreshold);
     s_cl_last_5h = h;
@@ -673,6 +696,7 @@ bool update_codex_page(cJSON* root)
 
 bool update_opencode_page(cJSON* root)
 {
+    if (kLayoutPages && !kShowOpenCodePage) return false;
     cJSON* obj = cJSON_GetObjectItem(root, "o");
     if (!cJSON_IsObject(obj) || has_error(obj)) return false;
     double today = jdbl(obj, "t");
@@ -761,7 +785,7 @@ void handle_line(const char* line)
     }
 
     bool alert = false;
-    alert |= update_claude_row(root);
+    alert |= update_claude_page(root);
     alert |= update_codex_page(root);
     alert |= update_opencode_page(root);
     update_sys(cJSON_GetObjectItem(root, "sys"));
@@ -875,21 +899,36 @@ void AppCodex::onOpen()
         s_cx_cost = build_cost_label(s_page_codex, 90, kCodexColor);
 
         // ---- OpenCode page ----
-        s_page_opencode = make_clean_container(s_root);
-        lv_obj_add_flag(s_page_opencode, LV_OBJ_FLAG_HIDDEN);
-        build_provider_header(s_page_opencode, -190, &logo_opencode, "OpenCode", kOpencodeColor);
-        s_oc_5h = build_win_row(s_page_opencode, -105, "5H", kOpencodeColor);
-        s_oc_wk = build_win_row(s_page_opencode, -5, "WK", kOpencodeColor);
-        s_oc_mo = build_win_row(s_page_opencode, 95, "MO", kOpencodeColor);
-        s_oc_cost = build_cost_label(s_page_opencode, 155, kOpencodeColor);
+        if (kShowOpenCodePage) {
+            s_page_opencode = make_clean_container(s_root);
+            lv_obj_add_flag(s_page_opencode, LV_OBJ_FLAG_HIDDEN);
+            build_provider_header(s_page_opencode, -190, &logo_opencode, "OpenCode", kOpencodeColor);
+            s_oc_5h = build_win_row(s_page_opencode, -105, "5H", kOpencodeColor);
+            s_oc_wk = build_win_row(s_page_opencode, -5, "WK", kOpencodeColor);
+            s_oc_mo = build_win_row(s_page_opencode, 95, "MO", kOpencodeColor);
+            s_oc_cost = build_cost_label(s_page_opencode, 155, kOpencodeColor);
+        }
+
+        // ---- Claude page ----
+        s_page_claude = make_clean_container(s_root);
+        lv_obj_add_flag(s_page_claude, LV_OBJ_FLAG_HIDDEN);
+        build_provider_header(s_page_claude, -190, &logo_claude, "Claude", kClaudeColor);
+        s_cl_5h = build_win_row(s_page_claude, -105, "5H", kClaudeColor);
+        s_cl_7d = build_win_row(s_page_claude, -5, "7D", kClaudeColor);
+        s_cl_cost = build_cost_label(s_page_claude, 90, kClaudeColor);
+        s_cl_5h.apply(0, 0);
+        s_cl_7d.apply(0, 0);
+        if (s_cl_cost) lv_label_set_text(s_cl_cost, "today ~$0.00 0");
 
         s_cx_5h.apply(0, 0);
         s_cx_7d.apply(0, 0);
         if (s_cx_cost) lv_label_set_text(s_cx_cost, "today ~$0.00 0");
-        s_oc_5h.apply(0, 0);
-        s_oc_wk.apply(0, 0);
-        s_oc_mo.apply(0, 0);
-        if (s_oc_cost) lv_label_set_text(s_oc_cost, "today ~$0.00 0");
+        if (kShowOpenCodePage) {
+            s_oc_5h.apply(0, 0);
+            s_oc_wk.apply(0, 0);
+            s_oc_mo.apply(0, 0);
+            if (s_oc_cost) lv_label_set_text(s_oc_cost, "today ~$0.00 0");
+        }
     } else {
         // ---- Classic: one AI page with two providers ----
         s_page_ai = make_clean_container(s_root);
@@ -1007,6 +1046,7 @@ void AppCodex::onClose()
         s_root = nullptr;
     }
     s_page_ai = nullptr;
+    s_page_claude = nullptr;
     s_page_codex = nullptr;
     s_page_opencode = nullptr;
     s_page_sys = nullptr;
@@ -1014,6 +1054,9 @@ void AppCodex::onClose()
     s_battery_icon_lbl = nullptr;
     s_battery_lbl = nullptr;
     s_last_battery_ms = 0;
+    s_cl_5h = WinRow{};
+    s_cl_7d = WinRow{};
+    s_cl_cost = nullptr;
     s_cx_5h = WinRow{};
     s_cx_7d = WinRow{};
     s_cx_cost = nullptr;

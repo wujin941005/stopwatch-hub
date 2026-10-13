@@ -218,7 +218,7 @@ reset countdowns, local token totals, API-equivalent value, and PC health.
 It supports three providers and two transports:
 
 - **Claude Code / Codex / OpenCode** — use the compact two-row layout, or give
-  Codex and OpenCode one full page each.
+  Codex, OpenCode, and Claude one full page each.
 - **Bluetooth LE and Wi‑Fi HTTP polling** — both optional and able to coexist.
 - **Host-system monitoring** — PC name, CPU, memory, disk space and I/O, plus
   network upload/download; pages can auto-cycle or be swiped manually.
@@ -301,11 +301,13 @@ Two display layouts are built in:
 
 - **`rows`** — the compact layout: choose any two of Claude Code, Codex, and
   OpenCode for one AI page.
-- **`pages`** — one full Codex page, one full OpenCode page, and optionally a
+- **`pages`** — one full page each for Codex, OpenCode, and Claude, and optionally a
   system page. This layout has room for each window's reset time and OpenCode's
   monthly quota.
 
 Set `CC_LAYOUT=rows|pages` before running `scripts/install_firmware.sh`.
+Set `CC_OPENCODE_PAGE=false` to omit OpenCode from the full-page layout; rebuild
+and flash after changing this setting.
 Host monitoring is opt-in: set `CC_SYSTEM_MONITOR=true` to collect host metrics
 and add the System page. In either layout the watch can show:
 
@@ -409,7 +411,7 @@ The same `.env` contains build-time watch settings and runtime bridge settings:
 | Setting | Used by | Reflash watch? | Restart bridge? |
 | --- | --- | --- | --- |
 | `CC_WIFI_*`, `CC_BRIDGE_*`, `CC_POLL_MS` | firmware installer | Yes | No |
-| `CC_LAYOUT`, `CC_AUTO_SWITCH_MS` | firmware installer | Yes | No |
+| `CC_LAYOUT`, `CC_OPENCODE_PAGE`, `CC_AUTO_SWITCH_MS` | firmware installer | Yes | No |
 | `CC_SYSTEM_MONITOR` | firmware installer + bridge | Yes | Yes |
 | `OPENCODE_GO_*`, `OPENCODE_DB` | bridge | No | Yes |
 | `CODEX_HOME`, `CLAUDE_CONFIG_DIR` | bridge | No | Yes |
@@ -567,8 +569,8 @@ transport.
   System page. `.env` and `build-firmware/` are ignored by Git.
 - **Rows providers / system page** — `firmware/app_codex/app_codex_config.h`
   (`kTopProvider` / `kBottomProvider`: `"c"` Claude, `"x"` Codex, `"o"`
-  OpenCode; `kShowSystemPage`). The full-page layout currently creates Codex
-  and OpenCode provider pages.
+  OpenCode; `kShowSystemPage`). The full-page layout creates Codex,
+  OpenCode, and Claude provider pages.
 - **Wi-Fi template defaults** — `firmware/app_codex/net/net_config.h`.
 - **Colors / alert threshold / fonts** — `firmware/app_codex/app_codex.cpp`
   (`kClaudeColor`, `kCodexColor`, `kOpencodeColor`, `kAlertThreshold`).
