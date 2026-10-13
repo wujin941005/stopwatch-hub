@@ -307,16 +307,18 @@ lv_point_t s_gesture_last;
 
 int page_count()
 {
-    int n = kLayoutPages ? (kShowOpenCodePage ? 3 : 2) : 1;  // provider pages
+    int n = kLayoutPages ? (int(kShowCodexPage) + int(kShowOpenCodePage) +
+                            int(kShowClaudePage)) : 1;  // provider pages
     return kShowSystemPage ? n + 1 : n;
 }
 
 lv_obj_t* page_obj(int idx)
 {
     if (kLayoutPages) {
-        if (idx == 0) return s_page_codex;
-        if (kShowOpenCodePage && idx == 1) return s_page_opencode;
-        if (idx == (kShowOpenCodePage ? 2 : 1)) return s_page_claude;
+        int position = 0;
+        if (kShowCodexPage && idx == position++) return s_page_codex;
+        if (kShowOpenCodePage && idx == position++) return s_page_opencode;
+        if (kShowClaudePage && idx == position++) return s_page_claude;
         return s_page_sys;
     }
     return (idx == 0) ? s_page_ai : s_page_sys;
@@ -618,6 +620,7 @@ void apply_oc_cost(double cost, std::int64_t tok)
 
 bool update_claude_page(cJSON* root)
 {
+    if (kLayoutPages && !kShowClaudePage) return false;
     cJSON* obj = cJSON_GetObjectItem(root, "c");
     cJSON* h_item = cJSON_GetObjectItemCaseSensitive(obj, "h");
     if (!cJSON_IsObject(obj) || has_error(obj) || !cJSON_IsNumber(h_item)) return false;
@@ -654,6 +657,7 @@ bool update_claude_page(cJSON* root)
 
 bool update_codex_page(cJSON* root)
 {
+    if (kLayoutPages && !kShowCodexPage) return false;
     cJSON* obj = cJSON_GetObjectItem(root, "x");
     cJSON* h_item = cJSON_GetObjectItemCaseSensitive(obj, "h");
     if (!cJSON_IsObject(obj) || has_error(obj) || !cJSON_IsNumber(h_item)) return false;
@@ -892,11 +896,13 @@ void AppCodex::onOpen()
 
     if (kLayoutPages) {
         // ---- Codex page ----
-        s_page_codex = make_clean_container(s_root);
-        build_provider_header(s_page_codex, -190, &logo_codex, "Codex", kCodexColor);
-        s_cx_5h = build_win_row(s_page_codex, -105, "5H", kCodexColor);
-        s_cx_7d = build_win_row(s_page_codex, -5, "7D", kCodexColor);
-        s_cx_cost = build_cost_label(s_page_codex, 90, kCodexColor);
+        if (kShowCodexPage) {
+            s_page_codex = make_clean_container(s_root);
+            build_provider_header(s_page_codex, -190, &logo_codex, "Codex", kCodexColor);
+            s_cx_5h = build_win_row(s_page_codex, -105, "5H", kCodexColor);
+            s_cx_7d = build_win_row(s_page_codex, -5, "7D", kCodexColor);
+            s_cx_cost = build_cost_label(s_page_codex, 90, kCodexColor);
+        }
 
         // ---- OpenCode page ----
         if (kShowOpenCodePage) {
@@ -910,19 +916,23 @@ void AppCodex::onOpen()
         }
 
         // ---- Claude page ----
-        s_page_claude = make_clean_container(s_root);
-        lv_obj_add_flag(s_page_claude, LV_OBJ_FLAG_HIDDEN);
-        build_provider_header(s_page_claude, -190, &logo_claude, "Claude", kClaudeColor);
-        s_cl_5h = build_win_row(s_page_claude, -105, "5H", kClaudeColor);
-        s_cl_7d = build_win_row(s_page_claude, -5, "7D", kClaudeColor);
-        s_cl_cost = build_cost_label(s_page_claude, 90, kClaudeColor);
-        s_cl_5h.apply(0, 0);
-        s_cl_7d.apply(0, 0);
-        if (s_cl_cost) lv_label_set_text(s_cl_cost, "today ~$0.00 0");
+        if (kShowClaudePage) {
+            s_page_claude = make_clean_container(s_root);
+            lv_obj_add_flag(s_page_claude, LV_OBJ_FLAG_HIDDEN);
+            build_provider_header(s_page_claude, -190, &logo_claude, "Claude", kClaudeColor);
+            s_cl_5h = build_win_row(s_page_claude, -105, "5H", kClaudeColor);
+            s_cl_7d = build_win_row(s_page_claude, -5, "7D", kClaudeColor);
+            s_cl_cost = build_cost_label(s_page_claude, 90, kClaudeColor);
+            s_cl_5h.apply(0, 0);
+            s_cl_7d.apply(0, 0);
+            if (s_cl_cost) lv_label_set_text(s_cl_cost, "today ~$0.00 0");
+        }
 
-        s_cx_5h.apply(0, 0);
-        s_cx_7d.apply(0, 0);
-        if (s_cx_cost) lv_label_set_text(s_cx_cost, "today ~$0.00 0");
+        if (kShowCodexPage) {
+            s_cx_5h.apply(0, 0);
+            s_cx_7d.apply(0, 0);
+            if (s_cx_cost) lv_label_set_text(s_cx_cost, "today ~$0.00 0");
+        }
         if (kShowOpenCodePage) {
             s_oc_5h.apply(0, 0);
             s_oc_wk.apply(0, 0);

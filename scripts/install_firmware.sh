@@ -162,10 +162,21 @@ if "CC_SYSTEM_MONITOR" in env and env.get("CC_SYSTEM_MONITOR"):
     enabled = env_bool("CC_SYSTEM_MONITOR")
     text2 = re.sub(r'kShowSystemPage\s*=\s*(true|false)',
                    f'kShowSystemPage = {"true" if enabled else "false"}', text2)
-if "CC_OPENCODE_PAGE" in env and env.get("CC_OPENCODE_PAGE"):
-    enabled = env_bool("CC_OPENCODE_PAGE")
-    text2 = re.sub(r'kShowOpenCodePage\s*=\s*(true|false)',
-                   f'kShowOpenCodePage = {"true" if enabled else "false"}', text2)
+for name, setting in (("CC_CODEX_PAGE", "kShowCodexPage"),
+                      ("CC_OPENCODE_PAGE", "kShowOpenCodePage"),
+                      ("CC_CLAUDE_PAGE", "kShowClaudePage")):
+    if name in env and env.get(name):
+        enabled = env_bool(name)
+        text2 = re.sub(rf'{setting}\s*=\s*(true|false)',
+                       f'{setting} = {"true" if enabled else "false"}', text2)
+
+# A system-only layout is valid; an empty rotation is not.
+def config_bool(setting):
+    return re.search(rf'{setting}\s*=\s*(true|false)', text2).group(1) == "true"
+
+if config_bool("kLayoutPages") and not any(config_bool(setting) for setting in (
+        "kShowCodexPage", "kShowOpenCodePage", "kShowClaudePage", "kShowSystemPage")):
+    raise SystemExit("CC_LAYOUT=pages requires at least one provider or system page")
 if "CC_AUTO_SWITCH_MS" in env and env.get("CC_AUTO_SWITCH_MS") is not None:
     text2 = re.sub(r'kAutoSwitchMs\s*=\s*\d+',
                    f'kAutoSwitchMs = {env["CC_AUTO_SWITCH_MS"]}', text2)

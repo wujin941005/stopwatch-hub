@@ -251,8 +251,10 @@ Bridge 运行在 WSL 时，还会自动检查挂载进来的 Windows 用户目�
   的重置时间和 OpenCode 月度配额
 
 运行 `scripts/install_firmware.sh` 前设置 `CC_LAYOUT=rows|pages`。
-不使用 OpenCode 时，设置 `CC_OPENCODE_PAGE=false` 可从独立页面布局中移除它；
-修改后需重新编译并刷入固件。系统监控默认关闭；
+独立页面布局可通过 `CC_CODEX_PAGE`、`CC_OPENCODE_PAGE`、`CC_CLAUDE_PAGE`
+分别开关三个 provider（默认均为 `true`）；修改后需重新编译并刷入固件。
+经典双行布局仍由 `kTopProvider` / `kBottomProvider` 选择 provider。
+设置 `CC_SYSTEM_MONITOR=true` 时可以关闭全部 provider，仅保留系统页；不允许所有页面都关闭。系统监控默认关闭；
 设置 `CC_SYSTEM_MONITOR=true` 后才会采集主机指标并加入系统页。两种布局均可显示：
 
 - provider **用量窗口**：百分比、品牌色进度条、重置倒计时
@@ -304,7 +306,7 @@ CC Island bridge 仍可在 Windows PowerShell 原生运行。
 | 配置 | 谁读取 | 要重新刷表？ | 要重启 bridge？ |
 | --- | --- | --- | --- |
 | `CC_WIFI_*`、`CC_BRIDGE_*`、`CC_POLL_MS` | 固件安装脚本 | 要 | 不要 |
-| `CC_LAYOUT`、`CC_OPENCODE_PAGE`、`CC_AUTO_SWITCH_MS` | 固件安装脚本 | 要 | 不要 |
+| `CC_LAYOUT`、`CC_CODEX_PAGE`、`CC_OPENCODE_PAGE`、`CC_CLAUDE_PAGE`、`CC_AUTO_SWITCH_MS` | 固件安装脚本 | 要 | 不要 |
 | `CC_SYSTEM_MONITOR` | 固件安装脚本 + bridge | 要 | 要 |
 | `OPENCODE_GO_*`、`OPENCODE_DB` | bridge | 不要 | 要 |
 | `CODEX_HOME`、`CLAUDE_CONFIG_DIR` | bridge | 不要 | 要 |

@@ -306,8 +306,11 @@ Two display layouts are built in:
   monthly quota.
 
 Set `CC_LAYOUT=rows|pages` before running `scripts/install_firmware.sh`.
-Set `CC_OPENCODE_PAGE=false` to omit OpenCode from the full-page layout; rebuild
-and flash after changing this setting.
+Use `CC_CODEX_PAGE`, `CC_OPENCODE_PAGE`, and `CC_CLAUDE_PAGE` to enable or
+disable each provider in the full-page layout (`true` by default). Rebuild and
+flash after changing them. Classic rows still use `kTopProvider` / `kBottomProvider`.
+All provider pages can be disabled when `CC_SYSTEM_MONITOR=true`; an empty
+page rotation is rejected.
 Host monitoring is opt-in: set `CC_SYSTEM_MONITOR=true` to collect host metrics
 and add the System page. In either layout the watch can show:
 
@@ -411,7 +414,7 @@ The same `.env` contains build-time watch settings and runtime bridge settings:
 | Setting | Used by | Reflash watch? | Restart bridge? |
 | --- | --- | --- | --- |
 | `CC_WIFI_*`, `CC_BRIDGE_*`, `CC_POLL_MS` | firmware installer | Yes | No |
-| `CC_LAYOUT`, `CC_OPENCODE_PAGE`, `CC_AUTO_SWITCH_MS` | firmware installer | Yes | No |
+| `CC_LAYOUT`, `CC_CODEX_PAGE`, `CC_OPENCODE_PAGE`, `CC_CLAUDE_PAGE`, `CC_AUTO_SWITCH_MS` | firmware installer | Yes | No |
 | `CC_SYSTEM_MONITOR` | firmware installer + bridge | Yes | Yes |
 | `OPENCODE_GO_*`, `OPENCODE_DB` | bridge | No | Yes |
 | `CODEX_HOME`, `CLAUDE_CONFIG_DIR` | bridge | No | Yes |

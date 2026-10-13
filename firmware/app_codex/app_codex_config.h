@@ -17,8 +17,11 @@
 //           system page. (Set from .env `CC_LAYOUT=pages|rows`.)
 inline const bool kLayoutPages = false;
 
-// Include OpenCode in the pages rotation. Set from .env `CC_OPENCODE_PAGE`.
+// Independently include provider pages in the full-page layout.
+// Set from .env `CC_CODEX_PAGE`, `CC_OPENCODE_PAGE`, `CC_CLAUDE_PAGE`.
+inline const bool kShowCodexPage = true;
 inline const bool kShowOpenCodePage = true;
+inline const bool kShowClaudePage = true;
 
 // Classic layout only — which two providers sit on the AI page:
 //   "c"  Claude Code, "x"  Codex, "o"  OpenCode
@@ -33,3 +36,7 @@ inline const uint32_t kAutoSwitchMs = 5000;
 // participates in the page rotation. Set from .env `CC_SYSTEM_MONITOR` by
 // scripts/install_firmware.sh; false preserves the original AI-only behavior.
 inline const bool kShowSystemPage = false;
+
+static_assert(!kLayoutPages || kShowCodexPage || kShowOpenCodePage ||
+              kShowClaudePage || kShowSystemPage,
+              "CC_LAYOUT=pages requires at least one provider or system page");
